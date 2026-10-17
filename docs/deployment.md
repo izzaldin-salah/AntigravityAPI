@@ -3,7 +3,7 @@
 > **Risk Notice & Terms of Service Warning:**
 > Antigravity OAuth integration through third-party applications is unofficial and may violate Google's Terms of Service. Account suspension is possible. This project does not attempt to circumvent provider restrictions. The live Antigravity path is experimental and unverified; the mock provider is the verified, offline default.
 
-This document describes deploying `personal-antigravity-api` to a **Render Free Web Service** using native Node.js (no Docker), paired with an **UptimeRobot** heartbeat monitor to keep the service responsive.
+This document describes deploying `personal-antigravity-api` to a **Render Free Web Service** using native Node.js (no Docker), paired with an **UptimeRobot** heartbeat monitor to keep the service responsive, along with configuring the **Account Management Dashboard** for managing provider credentials.
 
 ---
 
@@ -42,7 +42,57 @@ git push -u origin main
 
 ---
 
-## 3. Environment Variables Reference
+## 3. Account Dashboard Configuration (v1.1)
+
+The Account Management Dashboard (`/admin`) allows you to connect, inspect, and switch Antigravity Google accounts directly from your browser or via automation.
+
+### 3.1 Generate Credentials Locally
+Before configuring your deployment, generate an admin password hash and credential encryption key on your local machine:
+
+1. **Admin Password Hash:**
+   ```bash
+   node scripts/hash-admin-password.mjs "your-strong-password"
+   # Output: scrypt$16384$8$1$...
+   ```
+2. **Credential Encryption Key (AES-256-GCM):**
+   ```bash
+   node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+   # Output: 44-character base64 string
+   ```
+
+### 3.2 Dashboard Enablement Logic (`DASHBOARD_ENABLED`)
+- `auto` (default): The dashboard is automatically enabled if and only if an admin password (`ADMIN_PASSWORD_HASH` or `ADMIN_PASSWORD`) is provided. If no password is set, `/admin` renders a static "not configured" page.
+- `true`: Explicitly forces the dashboard on. Requires `ADMIN_PASSWORD_HASH` (or `ADMIN_PASSWORD`) and `CREDENTIAL_ENCRYPTION_KEY`; otherwise the server fails closed on startup.
+- `false`: Explicitly disables the dashboard, even if credentials are present in the environment.
+
+### 3.3 Credential Persistence & Durability Truth Table
+Antigravity OAuth refresh credentials are encrypted with AES-256-GCM before writing to storage. Choose your persistence backend wisely based on deployment targets:
+
+| Backend | Configuration | Durability on Render Free | Reconnect After Restart? | Account Switching Without Redeploy? |
+|---|---|---|---|---|
+| **Redis** *(Recommended for Production)* | `CREDENTIAL_STORE=auto` + `REDIS_URL` | **Durable** (survives restarts, sleeps, redeploys) | **No** (tokens persist across sleep cycles) | **Yes** (connect or switch via dashboard anytime) |
+| **File** *(Local Dev Only)* | `CREDENTIAL_STORE=file` (or `auto` without `REDIS_URL`) | **Ephemeral** (wiped on restart/sleep) | **Yes** (credentials lost when container spins down) | **No** (wiped on next container restart) |
+
+> **Render Free Ephemeral Filesystem Warning:**
+> Render Free instances wipe local disk storage whenever the instance sleeps or redeploys. If using `CREDENTIAL_STORE=file` on Render, stored credentials will be lost on container restart, requiring you to re-authenticate via the dashboard.
+> To persist credentials durably on Render, create a free **Render Key Value** instance and paste its connection URL into `REDIS_URL`, or use an external free Redis instance (such as [Upstash](https://upstash.com)).
+
+### 3.4 Google OAuth Client Setup
+If you want to use the browser-based OAuth connect flow (`/admin/actions/connect`), configure your Google Cloud OAuth 2.0 Web Client:
+
+1. Open your Google Cloud Console Credentials page.
+2. Under **Authorized redirect URIs**, add **both** of the following callback URLs:
+   - `http://127.0.0.1:3000/admin/oauth/callback` (for local development)
+   - `https://<your-render-subdomain>.onrender.com/admin/oauth/callback` (for Render production)
+3. Set `OAUTH_REDIRECT_BASE_URL` in Render to your public URL:
+   ```env
+   OAUTH_REDIRECT_BASE_URL=https://<your-render-subdomain>.onrender.com
+   ```
+4. If your Google OAuth client does not permit external apps or throws policy errors, you can always use the **Manual Credential** form on the dashboard to supply your refresh token directly.
+
+---
+
+## 4. Environment Variables Reference
 
 Configure the following environment variables in the Render Dashboard (**Environment** tab). Variables marked **Secret** must never be committed to source control.
 
@@ -58,22 +108,18 @@ Configure the following environment variables in the Render Dashboard (**Environ
 | `RATE_LIMIT_MAX` | No | No | `60` | Max requests per window per API key/IP (`0` disables). |
 | `CORS_ORIGINS` | No | No | `*` or specific origins | Allowed CORS origins (`*` or comma-separated URLs). |
 | `PROVIDER_MODE` | Yes | No | `mock` (or `antigravity`) | Default `mock` for safe offline testing. |
-| `ANTIGRAVITY_REFRESH_TOKEN` | If live | **Yes** | `...` | Persistent OAuth refresh token (**Primary source of truth**). |
-| `ANTIGRAVITY_ACCESS_TOKEN` | No | **Yes** | `...` | Short-lived OAuth access token (optional). |
-| `ANTIGRAVITY_CLIENT_ID` | No | **Yes** | `...` | OAuth client ID (optional if embedded). |
-| `ANTIGRAVITY_CLIENT_SECRET` | No | **Yes** | `...` | OAuth client secret (optional if embedded). |
-| `ANTIGRAVITY_PROJECT_ID` | No | No | `...` | Upstream project ID (optional). |
+| `DASHBOARD_ENABLED` | No | No | `auto` | `auto` enables when password is set; `true`/`false` force it. |
+| `ADMIN_PASSWORD_HASH` | If dashboard | **Yes** | `scrypt$16384$...` | scrypt hash from `scripts/hash-admin-password.mjs`. |
+| `CREDENTIAL_ENCRYPTION_KEY` | If dashboard | **Yes** | `base64-32-byte-key` | 32-byte base64 encryption key for stored tokens. |
+| `CREDENTIAL_STORE` | No | No | `auto` | `auto` selects redis if `REDIS_URL` is set, else file. |
+| `REDIS_URL` | For durable store | **Yes** | `rediss://...` | Connection URL for Render Key Value or external Redis. |
+| `OAUTH_REDIRECT_BASE_URL` | For OAuth | No | `https://<app>.onrender.com` | Public base URL for Google OAuth callback. |
+| `ANTIGRAVITY_REFRESH_TOKEN` | If env-based | **Yes** | `...` | Persistent OAuth refresh token fallback. |
+| `ANTIGRAVITY_CLIENT_ID` | No | **Yes** | `...` | OAuth client ID. |
+| `ANTIGRAVITY_CLIENT_SECRET` | No | **Yes** | `...` | OAuth client secret. |
+| `ANTIGRAVITY_PROJECT_ID` | No | No | `...` | Upstream project ID. |
 | `ANTIGRAVITY_ENDPOINT` | No | No | *(Leave blank)* | Upstream provider base URL override. |
 | `ANTIGRAVITY_TOKEN_STORE_PATH` | No | No | `./.data/antigravity-token.json` | Ephemeral on-disk cache path. |
-
----
-
-## 4. Ephemeral Filesystem & Credential Strategy
-
-Render Free instances operate on an **ephemeral container filesystem**:
-1. **Disk wipes on sleep & restart:** Whenever the instance sleeps due to inactivity, restarts, or deploys a new commit, all local files created during runtime (such as `./.data/antigravity-token.json`) are permanently destroyed.
-2. **Environment Variables are the Source of Truth:** All persistent credentials (specifically `ANTIGRAVITY_REFRESH_TOKEN` and `API_KEYS`) must be configured in Render's Environment settings.
-3. **Cache-Only Token Store:** The token store helper writes to disk opportunistically to avoid refreshing tokens on every request during a single container lifetime. If the file is missing or wiped, the server seamlessly falls back to refreshing via the environment variable.
 
 ---
 
@@ -88,7 +134,7 @@ Render Free instances automatically spin down (sleep) after **15 minutes of HTTP
    - **URL (or IP):** `https://<your-render-subdomain>.onrender.com/health`
    - **Monitoring Interval:** Every `5 minutes` (Free tier standard)
    - **Timeout:** `30 seconds`
-3. Click **Create Monitor**.
+3. Click **Create Monitor** (Note: `/health` requires no Bearer authentication and returns immediately without touching upstream providers).
 
 ### Critical Realities & Limitations of Heartbeat Pinging
 > **Important:** Pinging `/health` every 5 minutes **reduces** inactivity sleeping during active hours, but:
@@ -106,4 +152,4 @@ Be aware of the following platform constraints when operating on Render Free:
 - **Compute Quotas:** 0.1 CPU core, 512 MB RAM. Fastify runs well within this, but heavy simultaneous processing is not supported.
 - **Bandwidth Limits:** 100 GB/month outbound bandwidth on the free tier.
 - **Build Time Limits:** Free services are limited to 15-minute maximum build durations (standard builds take ~30 seconds).
-- **No Persistent Disks:** Any attached persistent disks require paid plans. Native Node environment variables must be used for persistent state.
+- **Ephemeral Storage:** Container filesystem resets on restart. Use `REDIS_URL` for durable credential persistence.
