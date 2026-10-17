@@ -4,7 +4,7 @@
 > Antigravity OAuth integration through third-party applications is unofficial and may violate Google's Terms of Service. Use of this software carries a risk of Google account suspension or termination.
 > - This project does **NOT** attempt to circumvent provider restrictions, quotas, rate limits, or safety guardrails.
 > - **Zero credential exposure:** No upstream OAuth credentials (access tokens, refresh tokens, client secrets) are EVER exposed or returned via any HTTP API endpoint or logged in server telemetry.
-> - Live Antigravity integration is considered **experimental and unverified**. The default `PROVIDER_MODE=mock` provides an entirely safe, offline development environment.
+> - Live Antigravity integration is **experimental**. The live path was verified locally on **2026-10-17** (browser OAuth connect, non-stream chat, SSE streaming with a personal account); long-term behavior (token refresh over time, deployed environment) remains unverified. The default `PROVIDER_MODE=mock` provides an entirely safe, offline development environment.
 
 ---
 

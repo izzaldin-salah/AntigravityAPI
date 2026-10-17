@@ -17,49 +17,34 @@ import { parseSseStream } from "./sse";
 const DEFAULT_ANTIGRAVITY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 
 /**
- * Static fallback models derived from Oh My Pi (OMP) research.
- * UNVERIFIED: Model availability, context window bounds, and output limits
- * are derived from OMP source analysis without live cloud verification.
+ * The single model this gateway serves. Every chat request is routed to it
+ * regardless of the model name the client requests — this is a personal
+ * single-model proxy. Live-verified against the real Antigravity backend
+ * on 2026-10-17 (non-stream + SSE streaming).
+ */
+export const ANTIGRAVITY_SERVED_MODEL = "gemini-3.8-flash-high";
+
+/**
+ * Wire SKU for the served model, discovered via
+ * POST /v1internal:fetchAvailableModels against the real backend
+ * (2026-10-17): the account exposes one tiered 3.8 SKU and the thinking
+ * level selects the tier — "HIGH" is the high-effort route. The public
+ * label stays gemini-3.8-flash-high for clients.
+ */
+export const ANTIGRAVITY_WIRE_MODEL = "gemini-3.8-flash-tiered";
+
+/**
+ * Static model listing exposed via GET /v1/models (single entry). Context
+ * window / output limits are informational, derived from the Gemini flash
+ * family.
  */
 export const ANTIGRAVITY_STATIC_MODELS: ModelInfo[] = [
   {
-    id: "gemini-2.5-flash",
-    object: "model",
-    created: 1715000000,
-    owned_by: "google-antigravity",
-    contextWindow: 1048576,
-    maxOutputTokens: 8192,
-  },
-  {
-    id: "gemini-2.5-pro",
-    object: "model",
-    created: 1715000000,
-    owned_by: "google-antigravity",
-    contextWindow: 2097152,
-    maxOutputTokens: 8192,
-  },
-  {
-    id: "gemini-3-flash",
+    id: ANTIGRAVITY_SERVED_MODEL,
     object: "model",
     created: 1720000000,
     owned_by: "google-antigravity",
     contextWindow: 1048576,
-    maxOutputTokens: 8192,
-  },
-  {
-    id: "gemini-3-pro",
-    object: "model",
-    created: 1720000000,
-    owned_by: "google-antigravity",
-    contextWindow: 2097152,
-    maxOutputTokens: 8192,
-  },
-  {
-    id: "claude-3-5-sonnet",
-    object: "model",
-    created: 1718000000,
-    owned_by: "google-antigravity",
-    contextWindow: 200000,
     maxOutputTokens: 8192,
   },
 ];
@@ -133,14 +118,9 @@ export class AntigravityProvider implements AIProvider {
       });
     }
 
-    const matchedModel = ANTIGRAVITY_STATIC_MODELS.find((m) => m.id === request.model);
-    if (!matchedModel) {
-      throw new ProviderError({
-        code: "not_found",
-        message: `Model '${request.model}' not found in Antigravity provider.`,
-        status: 404,
-      });
-    }
+    // Single-model gateway: every request is routed to the served model,
+    // regardless of the model name the client requested.
+    const effectiveModel = ANTIGRAVITY_SERVED_MODEL;
 
     // Step 1: Resolve access token
     let accessToken = await this.tokenManager.getAccessToken(request.signal);
@@ -241,7 +221,7 @@ export class AntigravityProvider implements AIProvider {
         yield {
           type: "start",
           id: resp.responseId || streamId,
-          model: request.model,
+          model: effectiveModel,
           created,
         };
         started = true;
@@ -290,7 +270,7 @@ export class AntigravityProvider implements AIProvider {
       yield {
         type: "start",
         id: streamId,
-        model: request.model,
+        model: effectiveModel,
         created,
       };
     }
@@ -303,7 +283,7 @@ export class AntigravityProvider implements AIProvider {
       };
     }
 
-    this.recordUsage(request.model, recordedUsage.promptTokens, recordedUsage.completionTokens);
+    this.recordUsage(effectiveModel, recordedUsage.promptTokens, recordedUsage.completionTokens);
 
     yield {
       type: "usage",
@@ -330,7 +310,8 @@ export class AntigravityProvider implements AIProvider {
   async healthCheck(): Promise<ProviderHealth> {
     return {
       ok: true,
-      detail: "Antigravity provider initialized (live path unverified).",
+      detail:
+        "Antigravity provider initialized. Serves gemini-3.8-flash-high for all requests (live backend verified 2026-10-17).",
     };
   }
 
@@ -376,12 +357,19 @@ export class AntigravityProvider implements AIProvider {
     if (request.temperature !== undefined) generationConfig.temperature = request.temperature;
     if (request.topP !== undefined) generationConfig.topP = request.topP;
     if (request.maxTokens !== undefined) generationConfig.maxOutputTokens = request.maxTokens;
+    // Gemini 3.x thinking routes: the "-high" wire SKU is paired with an
+    // explicit thinkingLevel, mirroring OMP's google-antigravity catalog
+    // (effortRouting high -> gemini-3.8-flash-high + thinkingLevel HIGH).
+    generationConfig.thinkingConfig = {
+      includeThoughts: true,
+      thinkingLevel: "HIGH",
+    };
 
     const projectId = this.tokenManager.getProjectId() || "default";
 
     return {
       project: projectId,
-      model: request.model,
+      model: ANTIGRAVITY_WIRE_MODEL,
       request: {
         contents,
         ...(systemInstruction ? { systemInstruction } : {}),

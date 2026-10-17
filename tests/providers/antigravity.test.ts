@@ -15,37 +15,52 @@ function createSseStream(chunks: string[]): ReadableStream<Uint8Array> {
 }
 
 describe("AntigravityProvider", () => {
-  it("lists verified static fallback models", async () => {
+  it("lists exactly the single served model", async () => {
     const provider = new AntigravityProvider();
     const models = await provider.listModels();
-    expect(models.length).toBeGreaterThanOrEqual(5);
-    const modelIds = models.map((m) => m.id);
-    expect(modelIds).toContain("gemini-2.5-flash");
-    expect(modelIds).toContain("gemini-2.5-pro");
-    expect(modelIds).toContain("gemini-3-flash");
-    expect(modelIds).toContain("gemini-3-pro");
-    expect(modelIds).toContain("claude-3-5-sonnet");
+    expect(models).toHaveLength(1);
+    expect(models[0].id).toBe("gemini-3.8-flash-high");
   });
 
-  it("handles unknown model with not_found error", async () => {
-    const provider = new AntigravityProvider();
+  it("routes any requested model name to the single served model", async () => {
+    let upstreamBody: {
+      model?: string;
+      request?: {
+        generationConfig?: {
+          thinkingConfig?: { includeThoughts?: boolean; thinkingLevel?: string };
+        };
+      };
+    } = {};
+    const fakeFetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      upstreamBody = JSON.parse(String(init?.body)) as typeof upstreamBody;
+      return new Response(
+        createSseStream([
+          'data: {"response":{"responseId":"resp_forced","candidates":[{"content":{"parts":[{"text":"routed"}]}}]}}\n\n',
+          "data: [DONE]\n\n",
+        ]),
+        { status: 200, headers: { "Content-Type": "text/event-stream" } },
+      );
+    }) as unknown as typeof fetch;
+
+    const provider = new AntigravityProvider({ accessToken: "test-token" }, { fetch: fakeFetch });
     const request: NormalizedChatRequest = {
       model: "gpt-4-unknown",
       messages: [{ role: "user", content: "hello" }],
       stream: true,
-      requestId: "unknown-model-req",
+      requestId: "force-route-req",
     };
 
-    await expect(async () => {
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      for await (const _ of provider.chat(request)) {
-        // do nothing
-      }
-    }).rejects.toMatchObject({
-      payload: {
-        code: "not_found",
-      },
+    const events = [];
+    for await (const event of provider.chat(request)) {
+      events.push(event);
+    }
+
+    expect(upstreamBody.model).toBe("gemini-3.8-flash-tiered");
+    expect(upstreamBody.request?.generationConfig?.thinkingConfig).toEqual({
+      includeThoughts: true,
+      thinkingLevel: "HIGH",
     });
+    expect(events[0]).toMatchObject({ type: "start", model: "gemini-3.8-flash-high" });
   });
 
   it("parses upstream SSE lines into standard ProviderEvents", async () => {
@@ -88,7 +103,7 @@ describe("AntigravityProvider", () => {
     }
 
     expect(events.length).toBe(5);
-    expect(events[0]).toMatchObject({ type: "start", id: "resp_abc_1", model: "gemini-2.5-flash" });
+    expect(events[0]).toMatchObject({ type: "start", id: "resp_abc_1", model: "gemini-3.8-flash-high" });
     expect(events[1]).toMatchObject({ type: "delta", text: "Hello " });
     expect(events[2]).toMatchObject({ type: "delta", text: "from Antigravity!" });
     expect(events[3]).toMatchObject({
@@ -301,6 +316,6 @@ describe("AntigravityProvider", () => {
     const provider = new AntigravityProvider();
     const health = await provider.healthCheck();
     expect(health.ok).toBe(true);
-    expect(health.detail).toContain("unverified");
+    expect(health.detail).toContain("gemini-3.8-flash-high");
   });
 });

@@ -1,7 +1,7 @@
 # Deployment Guide — Render Free + UptimeRobot
 
 > **Risk Notice & Terms of Service Warning:**
-> Antigravity OAuth integration through third-party applications is unofficial and may violate Google's Terms of Service. Account suspension is possible. This project does not attempt to circumvent provider restrictions. The live Antigravity path is experimental and unverified; the mock provider is the verified, offline default.
+> Antigravity OAuth integration through third-party applications is unofficial and may violate Google's Terms of Service. Account suspension is possible. This project does not attempt to circumvent provider restrictions. The live Antigravity path is experimental — verified locally on 2026-10-17 (OAuth connect, chat, SSE with a personal account) but not yet verified on Render; the mock provider remains the safe, offline default.
 
 This document describes deploying `personal-antigravity-api` to a **Render Free Web Service** using native Node.js (no Docker), paired with an **UptimeRobot** heartbeat monitor to keep the service responsive, along with configuring the **Account Management Dashboard** for managing provider credentials.
 

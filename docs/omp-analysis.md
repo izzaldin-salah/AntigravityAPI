@@ -187,12 +187,12 @@ However, because live credentials may be absent or network access restricted, `A
 
 ## 10. Explicit List of UNVERIFIED Assumptions
 
-Because no live Google Antigravity credentials or live cloud environment are available in this isolated worktree, the following assumptions are explicitly marked **UNVERIFIED**:
-1. **Live Response Wire Format:** Whether Google's production Cloud Code Assist endpoint returns candidate payloads identical to our parsed structures without undocumented framing.
-2. **Project Auto-Provisioning:** Whether calling `/v1internal:onboardUser` succeeds automatically for arbitrary Google accounts without manual web console acceptance.
-3. **Session ID & Trajectory Labels:** Whether the upstream service strictly requires `labels.trajectory_id` and `sessionId` in specific formats to prevent server-side rejection.
-4. **Third-Party Model Availability:** Whether Claude models remain enabled and reachable on the same endpoint across all tiers without specific enterprise grants.
-5. **Live Google OAuth Authorization:** Whether arbitrary user Google accounts can authorize the unofficial client scopes without Google consent verification blockers.
+Because no live Google Antigravity credentials or live cloud environment were available in this isolated worktree, the following assumptions were marked **UNVERIFIED**. **Note (2026-10-17):** local live verification with a personal account has since resolved the items annotated below; unannotated items remain unverified.
+1. **Live Response Wire Format:** Whether Google's production Cloud Code Assist endpoint returns candidate payloads identical to our parsed structures without undocumented framing. — **2026-10-17: verified locally** (non-stream + SSE responses parsed cleanly, usage extracted; no undocumented framing encountered).
+2. **Project Auto-Provisioning:** Whether calling `/v1internal:onboardUser` succeeds automatically for arbitrary Google accounts without manual web console acceptance. — **2026-10-17: not exercised**; requests succeeded with project `default`, so onboarding was not needed for this account.
+3. **Session ID & Trajectory Labels:** Whether the upstream service strictly requires `labels.trajectory_id` and `sessionId` in specific formats to prevent server-side rejection. — **2026-10-17: accepted live** (requests with `sessionId` + trajectory labels completed without rejection).
+4. **Third-Party Model Availability:** Whether Claude models remain enabled and reachable on the same endpoint across all tiers without specific enterprise grants. — **2026-10-17: partially resolved** — the connected account's `/v1internal:fetchAvailableModels` lists `claude-sonnet-4-6` and `claude-opus-4-6-thinking`; no live Claude completion call made yet.
+5. **Live Google OAuth Authorization:** Whether arbitrary user Google accounts can authorize the unofficial client scopes without Google consent verification blockers. — **2026-10-17: verified locally for one personal account** (community client pair, Authorization Code + PKCE; scopes email/openid/userinfo.email/cloud-platform granted; minted refresh token served live chat + streaming). Generalizability to arbitrary accounts remains unknown.
 
 ---
 

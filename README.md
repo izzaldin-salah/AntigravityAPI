@@ -23,7 +23,7 @@ Native Node.js deployment on **Render Free — no Docker**.
 | Account dashboard: login, CSRF, rate limiting, encrypted credential store | ✅ verified (offline, fake OAuth server) |
 | Mock provider mode (`PROVIDER_MODE=mock`) | ✅ verified end-to-end |
 | Auth, rate limiting, CORS, log redaction | ✅ verified |
-| Live Antigravity OAuth / upstream calls | 🧪 experimental, unverified |
+| Live Antigravity OAuth / upstream calls | 🧪 experimental; live-verified locally 2026-10-17 (OAuth connect, chat, SSE) — long-term refresh + deployed runtime still unverified |
 
 ## Quick start
 
@@ -40,6 +40,13 @@ npm start             # http://0.0.0.0:3000  (mock provider by default)
 `PROVIDER_MODE` defaults to `mock`, which runs fully offline with a
 deterministic provider (`mock-fast`, `mock-smart`). Outside production,
 if `API_KEYS` is unset the implicit dev key is `dev-local-key`.
+
+`PROVIDER_MODE=antigravity` serves exactly one model —
+`gemini-3.8-flash-high` — for every chat request, regardless of the model
+name the client sends; `GET /v1/models` lists only that model. On the wire
+the request uses the account's `gemini-3.8-flash-tiered` SKU with
+`thinkingLevel: HIGH` (verified live 2026-10-17). The account connection is
+managed in the `/admin` dashboard.
 
 ### Example requests (dev defaults)
 
