@@ -9,9 +9,10 @@ import {
   type TokenCounts,
   type UsageInfo,
 } from "../types/provider";
+import type { AntigravityAccountStatus, CredentialStore } from "../types/admin";
 import type { AntigravityCredentials } from "../types/config";
 import { TokenManager } from "./token-manager";
-import { parseSseStream, type UpstreamChunk } from "./sse";
+import { parseSseStream } from "./sse";
 
 const DEFAULT_ANTIGRAVITY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 
@@ -65,6 +66,8 @@ export const ANTIGRAVITY_STATIC_MODELS: ModelInfo[] = [
 
 export interface AntigravityProviderOptions {
   credentials?: AntigravityCredentials;
+  credentialStore?: CredentialStore;
+  tokenEndpoint?: string;
   fetch?: typeof fetch;
 }
 
@@ -82,13 +85,30 @@ export class AntigravityProvider implements AIProvider {
     byModel: {},
   };
 
-  constructor(credentials: AntigravityCredentials = {}, options: { fetch?: typeof fetch } = {}) {
+  constructor(
+    credentials: AntigravityCredentials = {},
+    options: {
+      fetch?: typeof fetch;
+      credentialStore?: CredentialStore;
+      tokenEndpoint?: string;
+    } = {},
+  ) {
     this.fetchImpl = options.fetch ?? globalThis.fetch;
     this.endpoint = (credentials.endpoint || DEFAULT_ANTIGRAVITY_ENDPOINT).replace(/\/+$/, "");
     this.tokenManager = new TokenManager({
       credentials,
+      credentialStore: options.credentialStore,
+      tokenEndpoint: options.tokenEndpoint,
       fetch: this.fetchImpl,
     });
+  }
+
+  getTokenManager(): TokenManager {
+    return this.tokenManager;
+  }
+
+  async getAccountStatus(): Promise<AntigravityAccountStatus> {
+    return this.tokenManager.getStatus();
   }
 
   async listModels(): Promise<ModelInfo[]> {
@@ -100,6 +120,16 @@ export class AntigravityProvider implements AIProvider {
       throw new ProviderError({
         code: "aborted",
         message: "Request was aborted before execution.",
+      });
+    }
+
+    // Fail fast when reconnect is required
+    if (this.tokenManager.isNeedsReconnect()) {
+      throw new ProviderError({
+        code: "unauthorized",
+        message:
+          "Antigravity credentials expired or revoked. Reconnect in the admin dashboard (/admin).",
+        status: 401,
       });
     }
 
@@ -256,7 +286,7 @@ export class AntigravityProvider implements AIProvider {
     }
 
     if (!started) {
-      // If stream ended without any candidate payload, ensure start was sent or report upstream error
+      // If stream ended without any candidate payload, ensure start was sent
       yield {
         type: "start",
         id: streamId,
@@ -380,7 +410,7 @@ export class AntigravityProvider implements AIProvider {
     if (status === 401 || status === 403) {
       throw new ProviderError({
         code: "unauthorized",
-        message: "Antigravity upstream authentication failed. Check credentials.",
+        message: "Antigravity upstream authentication failed. Check credentials in /admin.",
         status: 502,
       });
     }

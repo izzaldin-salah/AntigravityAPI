@@ -1,37 +1,33 @@
 # Handoff — antigravity-provider-agent
-
-- **Branch:** `t3/eff4aaf0` @ `09f769ae32b2527557299f50bc98e4697c3cc90b`
-- **Files created/modified:**
-  - `docs/omp-analysis.md` (created: thorough OMP architecture research, auth, streaming, usage, Google ToS notice)
-  - `src/providers/index.ts` (modified: replaced stub with `createProviderFromConfig` registry)
-  - `src/providers/mock.ts` (created: deterministic offline MockProvider with 2 models, streaming, usage, abort)
-  - `src/providers/antigravity.ts` (created: AntigravityProvider with token lifecycle, SSE parser, error mapping)
-  - `src/providers/token-manager.ts` (created: OAuth refresh logic, 60s skew, secret redaction, disk cache)
-  - `src/providers/sse.ts` (created: SSE stream parser for Cloud Code Assist events)
-  - `tests/providers/mock.test.ts` (created: 6 tests for determinism, abort, usage, unknown models)
-  - `tests/providers/token-manager.test.ts` (created: 3 tests for refresh shape, secret redaction, disk caching)
-  - `tests/providers/antigravity.test.ts` (created: 8 tests for 401 refresh, SSE parsing, error mapping, abort)
-  - `tests/providers/registry.test.ts` (created: 3 tests for provider mode instantiation)
-  - `docs/handoffs/antigravity-provider-agent.md` (this file)
-
-- **Features implemented:**
-  - `MockProvider`: deterministic offline responses based on last user turn, model listing (`mock-fast`, `mock-smart`), abort handling via `AbortSignal`, usage tracking in `getUsage()`, `healthCheck()`.
-  - `AntigravityProvider`: OAuth token refresh with 60s skew and 401 retry (at most once per request), secret redaction in all error messages, optional best-effort file token cache, static fallback models (`gemini-2.5-flash`, `gemini-2.5-pro`, `gemini-3-flash`, `gemini-3-pro`, `claude-3-5-sonnet`), mapping of OpenAI-style requests to upstream Cloud Code Assist format, SSE response parsing into standard `ProviderEvent`s, canonical error mapping per contract §8.
-  - `createProviderFromConfig`: factory dispatching `mock` -> `MockProvider`, `antigravity` -> `AntigravityProvider`, rejecting invalid modes with `invalid_request`.
-
-- **Tests performed (commands + observed results):**
-  - `npm test`: 5 test files passed (21 tests total, 20 provider tests + 1 coordinator smoke test), 0 failures.
-  - `npm run typecheck`: clean compilation under TypeScript `strict: true`, 0 errors.
-  - `npm run build`: successful CommonJS build to `dist/`, 0 errors.
-
-- **Known limitations:**
-  - Live Antigravity cloud connection is unverified due to lack of live OAuth credentials in this dev environment.
-  - Disk token cache is ephemeral on Render Free (runtime relies primarily on environment variables).
-
-- **Integration requirements:**
-  - No changes required to `src/types/provider.ts` or `src/types/config.ts`.
-  - No additional npm dependencies or `package.json` modifications needed.
-
-- **Verified vs unverified:**
-  - **VERIFIED:** Deterministic MockProvider streaming, token usage tracking, and abort behavior; TokenManager OAuth refresh request shape and secret redaction; AntigravityProvider SSE line-by-line event parsing and single-flight 401 token refresh; canonical error mapping; factory registration.
-  - **UNVERIFIED:** Live Google Cloud Code Assist endpoint response behavior under production traffic and third-party account provisioning (as documented in `docs/omp-analysis.md`).
+- Branch: t3/e8d90907 @ 9c00d9d3bcec923f5a538d03949bbbd00b804ae5
+- Files created/modified:
+  - `src/providers/oauth.ts` (replaced stub with full OAuthService, PKCE pair helper, accountHint extraction)
+  - `src/providers/token-manager.ts` (extended with CredentialStore, tokenEndpoint override, status, needsReconnect)
+  - `src/providers/antigravity.ts` (added getAccountStatus, fail-fast chat on needsReconnect)
+  - `src/providers/index.ts` (re-exports for oauth, additive deps in createProviderFromConfig)
+  - `tests/providers/oauth.test.ts` (10 new tests: PKCE S256, URL shape, exchangeCode, testRefresh, error mapping)
+  - `tests/providers/account-management.test.ts` (9 new tests: store resolution, swap without restart, sentinel leak check)
+  - `docs/omp-analysis.md` (updated with v1.1 OAuth and CredentialStore architecture)
+  - `docs/handoffs/antigravity-provider-agent.md` (handoff)
+- Features implemented:
+  - Real Google OAuth 2.0 PKCE (S256) implementation with `createOAuthService` and `createPkcePair`.
+  - `id_token` payload email extraction masked like `i***@domain.com` without leaking secrets.
+  - `TokenManager` resolution cascade: env credentials -> `credentialStore.load()` cached in memory -> fail-fast.
+  - Credential updates in `CredentialStore` or via `setCredentials`/`clearCredentials` picked up on next request without restart.
+  - `needsReconnect` tracking on invalid_grant / 401 refresh failure, cleared on successful refresh or new credentials.
+  - `AntigravityAccountStatus` reporting with client ID masking (first 4 + *** + last 4) and sentinel protection.
+  - `AntigravityProvider.getAccountStatus()` additive method; `chat()` fails fast pointing to `/admin` when reconnect needed.
+  - `createProviderFromConfig(config, deps)` supporting additive `deps.credentialStore` and `deps.tokenEndpoint`.
+- Tests performed:
+  - `npm run typecheck`: clean exit code 0.
+  - `npm test`: 14 test files, 90 tests passed (71 existing + 19 new provider tests).
+  - `npm run build`: clean exit code 0 (`dist/` generated).
+- Known limitations:
+  - 15s timeout on OAuth HTTP requests (`AbortSignal.timeout(15_000)`).
+  - Server disk caching (`tokenStorePath`) remains ephemeral on Render Free; durable storage relies on Redis CredentialStore.
+- Integration requirements:
+  - Additive `deps?: { credentialStore?: CredentialStore; tokenEndpoint?: string }` accepted by `createProviderFromConfig`.
+  - Zero new dependencies added; frozen `package.json` untouched.
+- Verified vs unverified:
+  - Verified: All 90 unit and integration tests pass deterministically without network.
+  - UNVERIFIED / EXPERIMENTAL: Live Google OAuth consent flow and live Antigravity Cloud Code Assist endpoint behavior remain unverified without production credentials. Unofficial-OAuth / Google ToS / account-suspension risk warnings documented.

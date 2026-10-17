@@ -1,35 +1,60 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { ProviderError } from "../types/provider";
+import type {
+  AntigravityAccountStatus,
+  CredentialStore,
+  StoredAntigravityCredentials,
+} from "../types/admin";
 import type { AntigravityCredentials } from "../types/config";
+import { GOOGLE_OAUTH_TOKEN_ENDPOINT } from "../types/config";
+import { ProviderError } from "../types/provider";
 
-const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 const OAUTH_REFRESH_SKEW_MS = 60_000;
 
 export interface TokenManagerOptions {
-  credentials: AntigravityCredentials;
+  credentials?: AntigravityCredentials;
+  credentialStore?: CredentialStore;
+  tokenEndpoint?: string;
   fetch?: typeof fetch;
 }
 
 export class TokenManager {
+  private envCredentials?: AntigravityCredentials;
+  private credentialStore?: CredentialStore;
+  private tokenEndpoint: string;
+  private fetchImpl: typeof fetch;
+
   private accessToken?: string;
   private refreshToken?: string;
   private clientId?: string;
   private clientSecret?: string;
   private projectId?: string;
+  private accountHint?: string;
   private expiresAt?: number;
   private tokenStorePath?: string;
-  private fetchImpl: typeof fetch;
-  private refreshPromise?: Promise<string>;
 
-  constructor(options: TokenManagerOptions) {
-    this.accessToken = options.credentials.accessToken;
-    this.refreshToken = options.credentials.refreshToken;
-    this.clientId = options.credentials.clientId;
-    this.clientSecret = options.credentials.clientSecret;
-    this.projectId = options.credentials.projectId;
-    this.tokenStorePath = options.credentials.tokenStorePath;
+  private refreshPromise?: Promise<string>;
+  private needsReconnect: boolean = false;
+  private lastRefreshAt?: number;
+  private lastError?: string;
+
+  private isManuallyMutated: boolean = false;
+  private memoryCleared: boolean = false;
+
+  constructor(options: TokenManagerOptions = {}) {
+    this.envCredentials = options.credentials;
+    this.credentialStore = options.credentialStore;
+    this.tokenEndpoint = options.tokenEndpoint ?? GOOGLE_OAUTH_TOKEN_ENDPOINT;
     this.fetchImpl = options.fetch ?? globalThis.fetch;
+    this.tokenStorePath = options.credentials?.tokenStorePath;
+
+    if (options.credentials) {
+      this.accessToken = options.credentials.accessToken;
+      this.refreshToken = options.credentials.refreshToken;
+      this.clientId = options.credentials.clientId;
+      this.clientSecret = options.credentials.clientSecret;
+      this.projectId = options.credentials.projectId;
+    }
 
     this.tryLoadFromTokenStore();
   }
@@ -38,7 +63,31 @@ export class TokenManager {
     return this.projectId;
   }
 
+  isNeedsReconnect(): boolean {
+    return this.needsReconnect;
+  }
+
   async getAccessToken(signal?: AbortSignal): Promise<string> {
+    await this.resolveCredentials();
+
+    if (this.needsReconnect) {
+      throw new ProviderError({
+        code: "unauthorized",
+        message:
+          this.lastError ||
+          "Antigravity credentials expired or revoked. Reconnect in the admin dashboard (/admin).",
+        status: 401,
+      });
+    }
+
+    if (!this.refreshToken && !this.accessToken) {
+      throw new ProviderError({
+        code: "unauthorized",
+        message: "No Antigravity credentials configured. Connect your account in /admin.",
+        status: 401,
+      });
+    }
+
     if (this.accessToken && !this.isTokenExpired()) {
       return this.accessToken;
     }
@@ -65,11 +114,171 @@ export class TokenManager {
     return this.refreshPromise;
   }
 
+  async setCredentials(creds: {
+    refreshToken: string;
+    clientId?: string;
+    clientSecret?: string;
+    projectId?: string;
+    accountHint?: string;
+  }): Promise<void> {
+    this.isManuallyMutated = true;
+    this.memoryCleared = false;
+    this.refreshToken = creds.refreshToken;
+    this.clientId = creds.clientId;
+    this.clientSecret = creds.clientSecret;
+    this.projectId = creds.projectId;
+    this.accountHint = creds.accountHint;
+    this.accessToken = undefined;
+    this.expiresAt = undefined;
+    this.needsReconnect = false;
+    this.lastError = undefined;
+
+    if (this.credentialStore) {
+      await this.credentialStore.save({
+        refreshToken: creds.refreshToken,
+        clientId: creds.clientId,
+        clientSecret: creds.clientSecret,
+        projectId: creds.projectId,
+        accountHint: creds.accountHint,
+        updatedAt: Date.now(),
+      });
+    }
+  }
+
+  async clearCredentials(): Promise<void> {
+    this.isManuallyMutated = true;
+    this.memoryCleared = true;
+    this.refreshToken = undefined;
+    this.accessToken = undefined;
+    this.clientId = undefined;
+    this.clientSecret = undefined;
+    this.projectId = undefined;
+    this.accountHint = undefined;
+    this.expiresAt = undefined;
+    this.needsReconnect = false;
+    this.lastError = undefined;
+
+    if (this.credentialStore) {
+      await this.credentialStore.clear();
+    }
+  }
+
+  async reloadFromStore(): Promise<void> {
+    this.isManuallyMutated = true;
+    this.memoryCleared = false;
+    if (this.credentialStore) {
+      const stored = await this.credentialStore.load();
+      if (stored) {
+        this.applyStoredCredentials(stored);
+      } else {
+        this.refreshToken = undefined;
+        this.accessToken = undefined;
+        this.clientId = undefined;
+        this.clientSecret = undefined;
+        this.projectId = undefined;
+        this.accountHint = undefined;
+      }
+    }
+  }
+
+  async getStatus(): Promise<AntigravityAccountStatus> {
+    await this.resolveCredentials();
+
+    const connected = Boolean(
+      (this.refreshToken && this.refreshToken.trim().length > 0) ||
+      (this.accessToken && this.accessToken.trim().length > 0)
+    );
+    const hasRefreshToken = Boolean(this.refreshToken && this.refreshToken.trim().length > 0);
+
+    let clientIdMasked: string | undefined;
+    if (this.clientId && this.clientId.trim().length > 0) {
+      const trimmed = this.clientId.trim();
+      if (trimmed.length > 12) {
+        clientIdMasked = `${trimmed.slice(0, 4)}***${trimmed.slice(-4)}`;
+      } else {
+        clientIdMasked = "***";
+      }
+    }
+
+    return {
+      providerMode: "antigravity",
+      connected,
+      hasRefreshToken,
+      accessTokenExpiresAt: this.expiresAt,
+      projectId: this.projectId,
+      clientIdMasked,
+      accountHint: this.accountHint,
+      needsReconnect: this.needsReconnect,
+      lastRefreshAt: this.lastRefreshAt,
+      lastError: this.lastError,
+    };
+  }
+
+  private hasEnvCredentials(): boolean {
+    return Boolean(
+      (this.envCredentials?.refreshToken && this.envCredentials.refreshToken.trim().length > 0) ||
+      (this.envCredentials?.accessToken && this.envCredentials.accessToken.trim().length > 0)
+    );
+  }
+
+  private async resolveCredentials(): Promise<void> {
+    if (this.memoryCleared) {
+      return;
+    }
+
+    // Priority 1: constructor env credentials if not manually mutated
+    if (!this.isManuallyMutated && this.hasEnvCredentials()) {
+      return;
+    }
+
+    // Priority 2: credentialStore.load()
+    if (this.credentialStore) {
+      try {
+        const stored = await this.credentialStore.load();
+        if (stored) {
+          if (stored.refreshToken !== this.refreshToken) {
+            this.applyStoredCredentials(stored);
+          } else {
+            this.clientId = stored.clientId;
+            this.clientSecret = stored.clientSecret;
+            this.projectId = stored.projectId;
+            this.accountHint = stored.accountHint;
+          }
+        } else if (!this.hasEnvCredentials() || this.isManuallyMutated) {
+          this.refreshToken = undefined;
+          this.accessToken = undefined;
+          this.clientId = undefined;
+          this.clientSecret = undefined;
+          this.projectId = undefined;
+          this.accountHint = undefined;
+        }
+      } catch {
+        // Best effort fallback
+      }
+    }
+  }
+
+  private applyStoredCredentials(stored: StoredAntigravityCredentials): void {
+    if (this.refreshToken !== stored.refreshToken) {
+      this.accessToken = undefined;
+      this.expiresAt = undefined;
+    }
+    this.refreshToken = stored.refreshToken;
+    this.clientId = stored.clientId;
+    this.clientSecret = stored.clientSecret;
+    this.projectId = stored.projectId;
+    this.accountHint = stored.accountHint;
+    this.needsReconnect = false;
+    this.lastError = undefined;
+  }
+
   private async performRefresh(signal?: AbortSignal): Promise<string> {
+    await this.resolveCredentials();
+
     if (!this.refreshToken) {
       throw new ProviderError({
         code: "unauthorized",
-        message: "No refresh token available for Antigravity OAuth.",
+        message: "No Antigravity credentials configured. Connect your account in /admin.",
         status: 401,
       });
     }
@@ -86,7 +295,7 @@ export class TokenManager {
 
     let response: Response;
     try {
-      response = await this.fetchImpl(GOOGLE_TOKEN_ENDPOINT, {
+      response = await this.fetchImpl(this.tokenEndpoint, {
         method: "POST",
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
@@ -111,9 +320,12 @@ export class TokenManager {
     if (!response.ok) {
       const status = response.status;
       if (status === 400 || status === 401) {
+        this.needsReconnect = true;
+        this.lastError =
+          "Antigravity credentials expired or revoked. Reconnect in the admin dashboard (/admin).";
         throw new ProviderError({
           code: "unauthorized",
-          message: `OAuth token refresh rejected with status ${status}. Re-authentication required.`,
+          message: this.lastError,
           status: 401,
         });
       }
@@ -156,8 +368,11 @@ export class TokenManager {
     const expiresInSec = typeof record.expires_in === "number" ? record.expires_in : 3600;
     this.accessToken = newAccessToken;
     this.expiresAt = Date.now() + expiresInSec * 1000;
+    this.needsReconnect = false;
+    this.lastError = undefined;
+    this.lastRefreshAt = Date.now();
 
-    // Persist to disk best-effort
+    // Persist to disk best-effort if tokenStorePath is used
     this.trySaveToTokenStore();
 
     return this.accessToken;
