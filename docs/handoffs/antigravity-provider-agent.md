@@ -1,6 +1,6 @@
 # Handoff — antigravity-provider-agent
 
-- **Branch:** `t3/eff4aaf0` @ `b540dd3f5391a8ab750bb92cd0df890ecfd39d3a`
+- **Branch:** `t3/eff4aaf0` @ `1bdad924df9bd2c0e728efb8b38a2408e5be4c80`
 - **Files created/modified:**
   - `docs/omp-analysis.md` (created: thorough OMP architecture research, auth, streaming, usage, Google ToS notice)
   - `src/providers/index.ts` (modified: replaced stub with `createProviderFromConfig` registry)
