@@ -151,4 +151,69 @@ describe("Environment Configuration (tests/config/env.test.ts)", () => {
       expect(ag.provider.credentials.tokenStorePath).toBe("./.data/antigravity-token.json");
     }
   });
+
+  // ---- v1.1 dashboard fail-closed tests (docs/architecture-contract.md §14, §16) ----
+
+  it("DASHBOARD_ENABLED=true without password -> throws ConfigError", () => {
+    expect(() =>
+      loadConfig({
+        DASHBOARD_ENABLED: "true",
+      }),
+    ).toThrowError(/DASHBOARD_ENABLED=true requires ADMIN_PASSWORD or ADMIN_PASSWORD_HASH/);
+  });
+
+  it("dashboard enabled (auto + password) without CREDENTIAL_ENCRYPTION_KEY -> throws ConfigError", () => {
+    expect(() =>
+      loadConfig({
+        ADMIN_PASSWORD: "plain-secret-password",
+      }),
+    ).toThrowError(/CREDENTIAL_ENCRYPTION_KEY is REQUIRED when the admin dashboard is enabled/);
+
+    expect(() =>
+      loadConfig({
+        DASHBOARD_ENABLED: "true",
+        ADMIN_PASSWORD: "plain-secret-password",
+      }),
+    ).toThrowError(/CREDENTIAL_ENCRYPTION_KEY is REQUIRED when the admin dashboard is enabled/);
+  });
+
+  it("ADMIN_PASSWORD_HASH not starting with scrypt$ -> throws ConfigError", () => {
+    expect(() =>
+      loadConfig({
+        ADMIN_PASSWORD_HASH: "bcrypt$12$invalid",
+      }),
+    ).toThrowError(/ADMIN_PASSWORD_HASH: expected format 'scrypt\$N\$r\$p\$<saltB64>\$<hashB64>'/);
+  });
+
+  it("CREDENTIAL_STORE=redis without REDIS_URL -> throws ConfigError", () => {
+    expect(() =>
+      loadConfig({
+        CREDENTIAL_STORE: "redis",
+      }),
+    ).toThrowError(/CREDENTIAL_STORE=redis requires REDIS_URL/);
+  });
+
+  it("DASHBOARD_ENABLED=false with password stays disabled without requiring CREDENTIAL_ENCRYPTION_KEY", () => {
+    const config = loadConfig({
+      DASHBOARD_ENABLED: "false",
+      ADMIN_PASSWORD: "dev-password-here",
+    });
+
+    expect(config.admin.enabled).toBe(false);
+    expect(config.admin.password).toBe("dev-password-here");
+  });
+
+  it("dashboard enabled with valid password and encryption key loads correctly", () => {
+    const config = loadConfig({
+      DASHBOARD_ENABLED: "auto",
+      ADMIN_PASSWORD_HASH: "scrypt$16384$8$1$saltb64$hashb64",
+      CREDENTIAL_ENCRYPTION_KEY: "my-valid-base64-or-passphrase-key",
+      CREDENTIAL_STORE: "file",
+    });
+
+    expect(config.admin.enabled).toBe(true);
+    expect(config.admin.passwordHash).toBe("scrypt$16384$8$1$saltb64$hashb64");
+    expect(config.credentials.backend).toBe("file");
+    expect(config.credentials.encryptionKey).toBe("my-valid-base64-or-passphrase-key");
+  });
 });

@@ -2,6 +2,7 @@ import Fastify from "fastify";
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "../../src/config/env";
 import {
+  createFixedWindowLimiter,
   createRateLimitHook,
   InMemoryRateLimiter,
 } from "../../src/middleware/rate-limit";
@@ -200,5 +201,60 @@ describe("Rate Limiting Middleware (tests/security/rate-limit.test.ts)", () => {
     expect(resIp2.statusCode).toBe(429);
 
     await app.close();
+  });
+
+  // ---- v1.1 createFixedWindowLimiter tests (§15, §16) ----
+
+  describe("createFixedWindowLimiter factory", () => {
+    it("max: 0 disables limiting completely", () => {
+      const limiter = createFixedWindowLimiter({ windowMs: 1000, max: 0 });
+      for (let i = 0; i < 20; i++) {
+        const res = limiter("any-key");
+        expect(res.allowed).toBe(true);
+        expect(res.limit).toBe(0);
+        expect(res.remaining).toBe(0);
+        expect(res.retryAfterSeconds).toBe(0);
+      }
+    });
+
+    it("tracks count and emits Retry-After when max is exceeded", () => {
+      const limiter = createFixedWindowLimiter({ windowMs: 5000, max: 2 });
+      const r1 = limiter("user-1");
+      expect(r1.allowed).toBe(true);
+      expect(r1.remaining).toBe(1);
+      expect(r1.limit).toBe(2);
+
+      const r2 = limiter("user-1");
+      expect(r2.allowed).toBe(true);
+      expect(r2.remaining).toBe(0);
+
+      const r3 = limiter("user-1");
+      expect(r3.allowed).toBe(false);
+      expect(r3.remaining).toBe(0);
+      expect(r3.retryAfterSeconds).toBeGreaterThanOrEqual(1);
+      expect(r3.retryAfterSeconds).toBeLessThanOrEqual(5);
+
+      // Other key still permitted
+      const other = limiter("user-2");
+      expect(other.allowed).toBe(true);
+      expect(other.remaining).toBe(1);
+    });
+
+    it("resets window after windowMs has elapsed", async () => {
+      const windowMs = 50;
+      const limiter = createFixedWindowLimiter({ windowMs, max: 1 });
+
+      const r1 = limiter("user-temp");
+      expect(r1.allowed).toBe(true);
+
+      const r2 = limiter("user-temp");
+      expect(r2.allowed).toBe(false);
+
+      await new Promise((resolve) => setTimeout(resolve, windowMs + 20));
+
+      const r3 = limiter("user-temp");
+      expect(r3.allowed).toBe(true);
+      expect(r3.remaining).toBe(0);
+    });
   });
 });

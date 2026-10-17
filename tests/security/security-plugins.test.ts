@@ -149,4 +149,72 @@ describe("Integrated Security Plugins (tests/security/security-plugins.test.ts)"
 
     await app.close();
   });
+
+  // ---- v1.1 Auth bypass matrix (§15, §16) ----
+
+  it("auth bypass matrix: /admin paths and /health bypass Bearer auth; /v1/** and /usage enforce Bearer auth", async () => {
+    const config = loadConfig({
+      NODE_ENV: "development",
+      API_KEYS: "expected-secret-key",
+    });
+
+    const app = Fastify();
+
+    // Register routes simulating the app endpoints
+    app.get("/health", async () => ({ status: "ok" }));
+    app.get("/admin", async () => ({ page: "admin-root" }));
+    app.get("/admin/dashboard", async () => ({ page: "dashboard" }));
+    app.post("/admin/actions/connect", async () => ({ status: "connect-started" }));
+    app.get("/v1/models", async () => ({ object: "list", data: [] }));
+    app.get("/usage", async () => ({ object: "usage", requests: 0 }));
+    app.post("/v1/chat/completions", async () => ({ id: "chatcmpl-1" }));
+
+    await registerSecurityPlugins(app, config);
+
+    // 1. GET /health (and with query) -> 200 without Bearer
+    const health1 = await app.inject({ method: "GET", url: "/health" });
+    expect(health1.statusCode).toBe(200);
+
+    const health2 = await app.inject({ method: "GET", url: "/health?check=1" });
+    expect(health2.statusCode).toBe(200);
+
+    // 2. /admin endpoints (any method) -> 200 without Bearer (admin plugin enforces its own session auth)
+    const adminRoot = await app.inject({ method: "GET", url: "/admin" });
+    expect(adminRoot.statusCode).toBe(200);
+
+    const adminDashboard = await app.inject({ method: "GET", url: "/admin/dashboard" });
+    expect(adminDashboard.statusCode).toBe(200);
+
+    const adminAction = await app.inject({ method: "POST", url: "/admin/actions/connect" });
+    expect(adminAction.statusCode).toBe(200);
+
+    // 3. /v1/models -> 401 without Bearer, 200 with valid Bearer
+    const modelsNoAuth = await app.inject({ method: "GET", url: "/v1/models" });
+    expect(modelsNoAuth.statusCode).toBe(401);
+    expect(modelsNoAuth.json().error.code).toBe("invalid_api_key");
+
+    const modelsWithAuth = await app.inject({
+      method: "GET",
+      url: "/v1/models",
+      headers: { authorization: "Bearer expected-secret-key" },
+    });
+    expect(modelsWithAuth.statusCode).toBe(200);
+
+    // 4. /usage -> 401 without Bearer, 200 with valid Bearer
+    const usageNoAuth = await app.inject({ method: "GET", url: "/usage" });
+    expect(usageNoAuth.statusCode).toBe(401);
+
+    const usageWithAuth = await app.inject({
+      method: "GET",
+      url: "/usage",
+      headers: { authorization: "Bearer expected-secret-key" },
+    });
+    expect(usageWithAuth.statusCode).toBe(200);
+
+    // 5. POST /v1/chat/completions -> 401 without Bearer
+    const chatNoAuth = await app.inject({ method: "POST", url: "/v1/chat/completions" });
+    expect(chatNoAuth.statusCode).toBe(401);
+
+    await app.close();
+  });
 });
