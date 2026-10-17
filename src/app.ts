@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { registerAdminDashboard, renderDisabledPage } from "./admin";
 import { OpenAIHttpError, formatOpenAIError } from "./core/errors";
 import { UsageTracker } from "./core/usage-tracker";
+import { RequestTracker, trackProvider } from "./core/request-tracker";
 import { registerRoutes } from "./routes";
 import type {
   CredentialStore,
@@ -98,10 +99,11 @@ export async function buildApp(
   });
 
   const usageTracker = options.usageTracker ?? new UsageTracker();
+  const requestTracker = new RequestTracker();
 
   await registerRoutes(app, {
     config: options.config,
-    provider: options.provider,
+    provider: trackProvider(options.provider, requestTracker, "api"),
     usageTracker,
   });
 
@@ -112,6 +114,7 @@ export async function buildApp(
       sessionStore: options.admin.sessionStore,
       credentialStore: options.admin.credentialStore,
       oauthService: options.admin.oauthService,
+      requestTracker,
     });
   } else {
     app.get("/admin", async (_request, reply) => {

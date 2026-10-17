@@ -202,6 +202,7 @@ async function main() {
     PROVIDER_MODE: "antigravity",
     ANTIGRAVITY_CLIENT_ID: "e2e-client-id.apps.googleusercontent.com",
     ANTIGRAVITY_CLIENT_SECRET: "e2e-client-secret",
+    ANTIGRAVITY_TOKEN_STORE_PATH: join(storeDir, "token-cache.json"),
     ANTIGRAVITY_OAUTH_TOKEN_ENDPOINT: fake.tokenUrl,
     ANTIGRAVITY_OAUTH_AUTH_ENDPOINT: fake.authUrl,
     OAUTH_REDIRECT_BASE_URL: `http://127.0.0.1:${APP_PORT}`,

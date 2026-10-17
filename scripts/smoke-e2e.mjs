@@ -14,6 +14,10 @@
  */
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
+import { createServer } from "node:http";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const results = [];
 let failures = 0;
@@ -73,12 +77,65 @@ const KEY = "smoke-secret-key";
 const PORT1 = 3456;
 const BASE1 = `http://127.0.0.1:${PORT1}`;
 
+// Exercise the actual Antigravity provider against an isolated local upstream.
+// Never use the operator's tokens, credential store, or Google account in smoke tests.
+const tempDir = await mkdtemp(join(tmpdir(), "antigravity-smoke-"));
+let upstreamCalls = 0;
+const upstream = createServer(async (req, res) => {
+  try {
+    let raw = "";
+    for await (const chunk of req) raw += chunk;
+    const body = JSON.parse(raw || "{}");
+    if (req.method !== "POST" ||
+        req.url !== "/v1internal:streamGenerateContent?alt=sse" ||
+        req.headers.authorization !== "Bearer smoke-upstream-token" ||
+        body.model !== "gemini-3.8-flash-tiered" ||
+        body.request?.generationConfig?.thinkingConfig?.thinkingLevel !== "HIGH") {
+      res.writeHead(400).end("Unexpected upstream request");
+      return;
+    }
+    upstreamCalls++;
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    res.write(`data: ${JSON.stringify({ response: {
+      responseId: "smoke-response",
+      candidates: [{ content: { parts: [{ text: "Hello from the local test upstream." }] }, finishReason: "STOP" }],
+      usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 8, totalTokenCount: 18 },
+    } })}\n\n`);
+    res.end("data: [DONE]\n\n");
+  } catch {
+    res.writeHead(400).end("Invalid upstream request");
+  }
+});
+await new Promise((resolve, reject) => {
+  upstream.once("error", reject);
+  upstream.listen(0, "127.0.0.1", resolve);
+});
+const upstreamEnv = {
+  PROVIDER_MODE: "antigravity",
+  ANTIGRAVITY_ENDPOINT: `http://127.0.0.1:${upstream.address().port}`,
+  ANTIGRAVITY_ACCESS_TOKEN: "smoke-upstream-token",
+  ANTIGRAVITY_REFRESH_TOKEN: "",
+  ANTIGRAVITY_CLIENT_ID: "",
+  ANTIGRAVITY_CLIENT_SECRET: "",
+  ANTIGRAVITY_PROJECT_ID: "smoke-project",
+  ANTIGRAVITY_TOKEN_STORE_PATH: join(tempDir, "tokens.json"),
+  ANTIGRAVITY_OAUTH_TOKEN_ENDPOINT: `http://127.0.0.1:${upstream.address().port}/token`,
+  CREDENTIAL_STORE: "file",
+  CREDENTIAL_FILE_PATH: join(tempDir, "credentials.json"),
+  CREDENTIAL_ENCRYPTION_KEY: "",
+  DASHBOARD_ENABLED: "false",
+  ADMIN_PASSWORD: "",
+  ADMIN_PASSWORD_HASH: "",
+};
+
+try {
+
 const server1 = startServer({
+  ...upstreamEnv,
   NODE_ENV: "production",
   HOST: "127.0.0.1",
   PORT: String(PORT1),
   API_KEYS: KEY,
-  PROVIDER_MODE: "mock",
   RATE_LIMIT_MAX: "1000",
   RATE_LIMIT_WINDOW_MS: "60000",
   LOG_LEVEL: "warn",
@@ -91,13 +148,13 @@ try {
   check("server starts; /health is public", ready);
   if (!ready) {
     console.error(server1.getLog());
-    process.exit(1);
+    throw new Error("Smoke server did not start");
   }
 
   const health = await (await fetch(`${BASE1}/health`)).json();
   check(
     "health shape ok (status + provider.mode)",
-    health.status === "ok" && health.provider?.mode === "mock",
+    health.status === "ok" && health.provider?.mode === "antigravity",
     JSON.stringify(health).slice(0, 140),
   );
 
@@ -120,10 +177,10 @@ try {
   const models = await modelsRes.json();
   const ids = (models.data || []).map((m) => m.id);
   check(
-    "/v1/models with key -> OpenAI list incl. mock model",
+    "/v1/models with key -> single Antigravity model",
     modelsRes.status === 200 &&
       models.object === "list" &&
-      ids.some((id) => String(id).startsWith("mock")),
+      ids.length === 1 && ids[0] === "gemini-3.8-flash-high",
     `ids=${ids.join(",")}`,
   );
 
@@ -205,6 +262,7 @@ try {
 
   const ridRes = await fetch(`${BASE1}/health`);
   check("x-request-id response header present", !!ridRes.headers.get("x-request-id"));
+  check("Antigravity provider sends both chat requests to the local upstream", upstreamCalls === 2);
 } finally {
   await stopServer(server1);
 }
@@ -212,11 +270,11 @@ try {
 const PORT2 = 3457;
 const BASE2 = `http://127.0.0.1:${PORT2}`;
 const server2 = startServer({
+  ...upstreamEnv,
   NODE_ENV: "development",
   HOST: "127.0.0.1",
   PORT: String(PORT2),
   API_KEYS: KEY,
-  PROVIDER_MODE: "mock",
   RATE_LIMIT_MAX: "3",
   RATE_LIMIT_WINDOW_MS: "60000",
   LOG_LEVEL: "error",
@@ -258,4 +316,8 @@ for (const line of results) console.log(line);
 console.log(
   `\n${failures === 0 ? "ALL PASSED" : failures + " FAILURE(S)"} (${results.length} checks)`,
 );
-process.exit(failures === 0 ? 0 : 1);
+process.exitCode = failures === 0 ? 0 : 1;
+} finally {
+  await new Promise((resolve) => upstream.close(resolve));
+  await rm(tempDir, { recursive: true, force: true });
+}

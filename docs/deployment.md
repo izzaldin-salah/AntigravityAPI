@@ -1,7 +1,7 @@
 # Deployment Guide — Render Free + UptimeRobot
 
 > **Risk Notice & Terms of Service Warning:**
-> Antigravity OAuth integration through third-party applications is unofficial and may violate Google's Terms of Service. Account suspension is possible. This project does not attempt to circumvent provider restrictions. The live Antigravity path is experimental — verified locally on 2026-10-17 (OAuth connect, chat, SSE with a personal account) but not yet verified on Render; the mock provider remains the safe, offline default.
+> Antigravity OAuth integration through third-party applications is unofficial and may violate Google's Terms of Service. Account suspension is possible. This project does not attempt to circumvent provider restrictions. The live Antigravity path is experimental — verified locally on 2026-10-17 (OAuth connect, chat, SSE with a personal account) but not yet verified on Render. Antigravity is the only supported provider; automated checks use isolated local test servers.
 
 This document describes deploying `personal-antigravity-api` to a **Render Free Web Service** using native Node.js (no Docker), paired with an **UptimeRobot** heartbeat monitor to keep the service responsive, along with configuring the **Account Management Dashboard** for managing provider credentials.
 
@@ -108,7 +108,7 @@ Configure the following environment variables in the Render Dashboard (**Environ
 | `RATE_LIMIT_WINDOW_MS` | No | No | `60000` | Fixed rate limit window in milliseconds (default: 1 min). |
 | `RATE_LIMIT_MAX` | No | No | `60` | Max requests per window per API key/IP (`0` disables). |
 | `CORS_ORIGINS` | No | No | `*` or specific origins | Allowed CORS origins (`*` or comma-separated URLs). |
-| `PROVIDER_MODE` | Yes | No | `mock` (or `antigravity`) | Default `mock` for safe offline testing. |
+| `PROVIDER_MODE` | No | No | `antigravity` | Only supported value and default; connect an account before chat requests. |
 | `DASHBOARD_ENABLED` | No | No | `auto` | `auto` enables when password is set; `true`/`false` force it. |
 | `ADMIN_PASSWORD_HASH` | If dashboard | **Yes** | `scrypt$16384$...` | scrypt hash from `scripts/hash-admin-password.mjs`. |
 | `CREDENTIAL_ENCRYPTION_KEY` | If dashboard | **Yes** | `base64-32-byte-key` | 32-byte base64 encryption key for stored tokens. |

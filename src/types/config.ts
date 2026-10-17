@@ -23,9 +23,10 @@ export interface AntigravityCredentials {
   tokenStorePath?: string;
 }
 
-export type ProviderConfig =
-  | { mode: "mock" }
-  | { mode: "antigravity"; credentials: AntigravityCredentials };
+export type ProviderConfig = {
+  mode: "antigravity";
+  credentials: AntigravityCredentials;
+};
 
 /** v1.1: admin dashboard configuration (resolved by loadConfig; secrets never logged). */
 export interface AdminConfig {

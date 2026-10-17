@@ -1,7 +1,7 @@
 # Oh My Pi (OMP) Architecture Analysis: Google Antigravity Provider
 
 > **Risk Notice & Google Terms of Service Warning:**
-> Antigravity OAuth integration through third-party applications is unofficial and may violate Google's Terms of Service; account suspension is possible. This project does not attempt to circumvent provider restrictions. The live Antigravity path in this gateway ships as **EXPERIMENTAL / UNVERIFIED** unless validated against live credentials. Mock mode is the fully verified and supported default.
+> Antigravity OAuth integration through third-party applications is unofficial and may violate Google's Terms of Service; account suspension is possible. This project does not attempt to circumvent provider restrictions. The live Antigravity path in this gateway ships as **EXPERIMENTAL / UNVERIFIED** unless validated against live credentials. Antigravity is the only supported runtime provider; tests use isolated local fixtures.
 
 ---
 

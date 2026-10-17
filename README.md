@@ -8,8 +8,7 @@ Native Node.js deployment on **Render Free — no Docker**.
 > applications is **unofficial**, may violate Google's Terms of Service, and
 > carries **account-suspension risk**. This project does not attempt to
 > circumvent provider restrictions. The live Antigravity path ships as
-> **EXPERIMENTAL / UNVERIFIED** (no live credentials were exercised); the
-> `mock` provider is the fully verified default. See
+> **EXPERIMENTAL**. Antigravity is the only supported provider. See
 > [`docs/security.md`](docs/security.md) and [`docs/omp-analysis.md`](docs/omp-analysis.md).
 
 ## Status
@@ -17,11 +16,10 @@ Native Node.js deployment on **Render Free — no Docker**.
 | Area | State |
 | --- | --- |
 | Build + typecheck (`strict`) | ✅ verified |
-| Unit/integration tests (19 files, 139 tests) | ✅ verified |
-| End-to-end HTTP smoke (`npm run smoke:e2e`, 16 checks) | ✅ verified |
+| Unit/integration tests | ✅ verified |
+| End-to-end HTTP smoke (`npm run smoke:e2e`, 17 checks) | ✅ verified |
 | Account dashboard e2e (`npm run smoke:account`, 32 checks) | ✅ verified |
 | Account dashboard: login, CSRF, rate limiting, encrypted credential store | ✅ verified (offline, fake OAuth server) |
-| Mock provider mode (`PROVIDER_MODE=mock`) | ✅ verified end-to-end |
 | Auth, rate limiting, CORS, log redaction | ✅ verified |
 | Live Antigravity OAuth / upstream calls | 🧪 experimental; live-verified locally 2026-10-17 (OAuth connect, chat, SSE) — long-term refresh + deployed runtime still unverified |
 
@@ -30,15 +28,18 @@ Native Node.js deployment on **Render Free — no Docker**.
 ```bash
 npm ci
 npm run build
-npm test              # 139 unit/integration tests (offline)
+npm test              # unit/integration tests (offline)
 npm run smoke:e2e     # end-to-end check of the built server (needs build)
 npm run smoke:account # full account-dashboard workflow vs a fake OAuth server
-npm start             # http://0.0.0.0:3000  (mock provider by default)
-# or: npm run dev     # tsx watch, same behavior
+# Configure .env first (copy .env.example and fill in your credentials)
+node --env-file=.env dist/server.js  # http://0.0.0.0:3000
+# Without a .env file, export environment variables before npm start / npm run dev.
 ```
 
-`PROVIDER_MODE` defaults to `mock`, which runs fully offline with a
-deterministic provider (`mock-fast`, `mock-smart`). Outside production,
+`PROVIDER_MODE` defaults to `antigravity`, the only supported provider.
+Connect your account in `/admin` before sending chat requests. The server does
+not load `.env` automatically; use the Node command above for local testing.
+Outside production,
 if `API_KEYS` is unset the implicit dev key is `dev-local-key`.
 
 `PROVIDER_MODE=antigravity` serves exactly one model —
@@ -56,11 +57,11 @@ curl http://localhost:3000/health
 curl -H "Authorization: Bearer dev-local-key" http://localhost:3000/v1/models
 
 curl -H "Authorization: Bearer dev-local-key" -H "Content-Type: application/json" \
-  -d '{"model":"mock-fast","messages":[{"role":"user","content":"hello"}]}' \
+  -d '{"model":"gemini-3.8-flash-high","messages":[{"role":"user","content":"hello"}]}' \
   http://localhost:3000/v1/chat/completions
 
 curl -N -H "Authorization: Bearer dev-local-key" -H "Content-Type: application/json" \
-  -d '{"model":"mock-fast","messages":[{"role":"user","content":"hello"}],"stream":true}' \
+  -d '{"model":"gemini-3.8-flash-high","messages":[{"role":"user","content":"hello"}],"stream":true}' \
   http://localhost:3000/v1/chat/completions
 
 curl -H "Authorization: Bearer dev-local-key" http://localhost:3000/usage
@@ -99,16 +100,25 @@ Open `http://localhost:3000/admin`, log in, and you can:
 - **connect with browser OAuth** (Authorization Code + PKCE) when your own
   Google OAuth client is configured (`ANTIGRAVITY_CLIENT_ID`, optional secret) —
   if Google rejects the client or scopes, the exact error is shown and the
-  manual path stays available;
+  dashboard shows connection guidance;
 - **copy-URL localhost sign-in** — for OAuth clients registered with a
   localhost redirect only (e.g. on Render, where an `onrender.com` callback
   cannot be registered): start sign-in, complete it in Google (the browser then
   fails to load the localhost page — expected), and paste the entire
   `http://127.0.0.1:51121/oauth-callback?...` URL from the address bar back into
   the dashboard to finish the exchange server-side;
-- **paste a refresh token** manually — validated with a live token refresh
-  before anything is stored, so a bad token never replaces a good one;
 - reconnect, switch accounts (disconnect → connect), and log out.
+- **test a live response** with a fixed short prompt, latency, a 30-second timeout, and a cooldown;
+- **copy client setup**: API base URL, model, and cURL/Python examples with an environment-variable key placeholder; reveal the first configured API key only on demand;
+- **inspect usage and recent requests**: provider attempts, reported input/output tokens, failures, cancellations, average duration, and the latest 50 metadata rows;
+- **check account and storage health**: expiry, last refresh, last successful request, credential-store availability, and persistence limitations.
+
+Dashboard counters cover provider attempts from API calls and connection tests. They reset
+on restart, are local to this server instance, and omit requests rejected before reaching
+the provider. History stores no prompts, responses, credentials, or raw error messages.
+The live test consumes account quota; its response is displayed only for that request.
+API-key reveal and live tests require an admin session plus CSRF and return `Cache-Control: no-store`.
+Redis restart durability is not assumed; local file durability depends on the deployment disk.
 
 Security invariants: OAuth tokens are never exposed to the browser or API
 clients (sentinel-tested in the suite), the credential blob is AES-256-GCM
@@ -127,8 +137,7 @@ and account switching without redeploys. Full setup:
 ## Configuration
 
 All configuration is environment-variable based — start from
-[`.env.example`](.env.example). Key switches: `PROVIDER_MODE` (`mock` |
-`antigravity`), `API_KEYS` (comma-separated; required in production),
+[`.env.example`](.env.example). Key switches: `PROVIDER_MODE` (`antigravity` only), `API_KEYS` (comma-separated; required in production),
 `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW_MS` (`0` disables), `CORS_ORIGINS`,
 `TRUST_PROXY` (set `true` on Render). Antigravity mode additionally reads
 `ANTIGRAVITY_*` credentials — see the contract §6 in
@@ -163,7 +172,7 @@ src/
 ├── admin/       # account dashboard: routes, sessions, CSRF use, HTML pages
 ├── core/        # usage tracker, chunk mapping, error envelope, ids
 ├── routes/      # /v1/chat/completions, /v1/models, /usage, /health
-├── providers/   # AIProvider implementations: mock + antigravity (+ OAuth, SSE, tokens)
+├── providers/   # Antigravity provider (+ OAuth, SSE, tokens)
 ├── middleware/  # auth, rate limit, CORS, error handler
 ├── security/    # redaction, token store, encrypted credential store, redis-lite
 ├── config/      # zod-validated environment loader

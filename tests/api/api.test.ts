@@ -13,7 +13,7 @@ const testConfig: AppConfig = {
   rateLimit: { windowMs: 60000, max: 60 },
   corsOrigins: "*",
   trustProxy: false,
-  provider: { mode: "mock" },
+  provider: { mode: "antigravity", credentials: {} },
   admin: {
     enabled: false,
     sessionTtlMs: 43200000,
@@ -35,7 +35,7 @@ describe("personal-antigravity-api API endpoints", () => {
     expect(body.status).toBe("ok");
     expect(body.version).toBe("0.1.0");
     expect(typeof body.uptime).toBe("number");
-    expect(body.provider).toEqual({ mode: "mock" });
+    expect(body.provider).toEqual({ mode: "antigravity" });
 
     // Assert that /health made NO provider calls
     expect(provider.listModelsCalls).toBe(0);

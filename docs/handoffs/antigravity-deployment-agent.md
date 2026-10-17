@@ -24,4 +24,4 @@
   - `src/types/**` and architecture contract v1.1 remain coordinator-frozen.
 - Verified vs unverified:
   - Verified: AES-256-GCM encryption roundtrips, wrong-key failures, RESP2 wire communication with scripted mock TCP server, session sliding TTL and cap eviction, CSRF timing-safe verification, auth bypass matrix, and environment fail-closed validation.
-  - Unverified / Experimental: Live Google OAuth / Antigravity upstream endpoints remain unverified against live accounts; mock mode remains the verified default. Unofficial OAuth carries risk of account suspension per Google ToS.
+  - Unverified / Experimental: Live Google OAuth / Antigravity upstream endpoints remain unverified against live accounts; the historical mock default has since been removed; Antigravity is the only runtime provider. Unofficial OAuth carries risk of account suspension per Google ToS.

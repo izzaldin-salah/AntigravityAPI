@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { TokenManager } from "../../src/providers/token-manager";
 import { AntigravityProvider } from "../../src/providers/antigravity";
-import { MockProvider, createProviderFromConfig } from "../../src/providers";
+import { createProviderFromConfig } from "../../src/providers";
 import { ProviderError, type NormalizedChatRequest } from "../../src/types/provider";
 import type { CredentialStore, StoredAntigravityCredentials } from "../../src/types/admin";
 import type { ProviderConfig } from "../../src/types/config";
@@ -346,13 +346,6 @@ describe("Account Management & Credential Store Integration", () => {
     expect(status.connected).toBe(true);
     expect(status.projectId).toBe("cfg-project");
 
-    // MockProvider ignores deps
-    const mockConfig: ProviderConfig = { mode: "mock" };
-    const mockProvider = createProviderFromConfig(mockConfig, {
-      credentialStore: fakeStore,
-      tokenEndpoint: "https://auth-test.endpoint/token",
-    });
-    expect(mockProvider).toBeInstanceOf(MockProvider);
   });
 
   it("supports runtime mutation via clearCredentials and setCredentials", async () => {

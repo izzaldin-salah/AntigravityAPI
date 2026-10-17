@@ -1,14 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { createProviderFromConfig, MockProvider, AntigravityProvider } from "../../src/providers";
+import { createProviderFromConfig, AntigravityProvider } from "../../src/providers";
 import { ProviderError } from "../../src/types/provider";
 import type { ProviderConfig } from "../../src/types/config";
 
 describe("createProviderFromConfig", () => {
-  it("returns MockProvider when mode is mock", () => {
-    const config: ProviderConfig = { mode: "mock" };
-    const provider = createProviderFromConfig(config);
-    expect(provider).toBeInstanceOf(MockProvider);
-    expect(provider.id).toBe("mock");
+  it("rejects the removed mock mode instead of returning simulated responses", () => {
+    const config = { mode: "mock" } as unknown as ProviderConfig;
+    expect(() => createProviderFromConfig(config)).toThrowError(ProviderError);
   });
 
   it("returns AntigravityProvider when mode is antigravity", () => {

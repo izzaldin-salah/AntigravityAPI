@@ -28,8 +28,7 @@ no multi-tenant auth, no circumvention of provider restrictions.
 Hard risk statement (repeat it in docs you write): Antigravity OAuth through
 third-party applications is unofficial and may violate Google's Terms of Service;
 account suspension is possible. The live Antigravity path ships as
-EXPERIMENTAL/UNVERIFIED unless actually tested against live credentials. Mock mode
-is the fully verified default.
+EXPERIMENTAL/UNVERIFIED unless actually tested against live credentials. Antigravity is the only supported runtime provider.
 
 ## 2. Stack and conventions
 
@@ -81,7 +80,7 @@ Directory intent:
 - `src/api/**` — OpenAI wire handling: validation, normalization, response/SSE encoding, error envelope
 - `src/routes/**` — route registration: /v1/chat/completions, /v1/models, /usage, /health
 - `src/core/**` — plumbing: UsageTracker, id generation, event-to-chunk mapping, error mapping
-- `src/providers/**` — AIProvider implementations (mock + antigravity) and registry
+- `src/providers/**` — AIProvider implementation (antigravity) and registry
 - `src/middleware/**`, `src/security/**`, `src/config/**` — security, env validation, credential handling
 
 ## 5. Shared types
@@ -116,7 +115,7 @@ Key rules:
 | RATE_LIMIT_MAX | 60 | `0` disables rate limiting |
 | CORS_ORIGINS | * | comma list or `*` |
 | TRUST_PROXY | false | set `true` on Render |
-| PROVIDER_MODE | mock | `mock` or `antigravity` |
+| PROVIDER_MODE | antigravity | `antigravity` only |
 | ANTIGRAVITY_ACCESS_TOKEN | — | optional, short-lived |
 | ANTIGRAVITY_REFRESH_TOKEN | — | preferred persistent credential (Render env var) |
 | ANTIGRAVITY_CLIENT_ID | — | optional |
@@ -140,7 +139,7 @@ Endpoints:
 1. `POST /v1/chat/completions` — OpenAI-compatible request/response; SSE when body `stream:true`.
 2. `GET /v1/models` -> `{"object":"list","data":[...ModelInfo]}`
 3. `GET /usage` -> `{"object":"usage","data":{"requests":n,"prompt_tokens":n,"completion_tokens":n,"total_tokens":n,"by_model":{"<model>":{"requests":n,"prompt_tokens":n,"completion_tokens":n,"total_tokens":n}},"since":<epoch ms>,"provider":<UsageInfo|null>}}`
-4. `GET /health` -> `{"status":"ok","version":"0.1.0","uptime":<sec>,"timestamp":<iso>,"provider":{"mode":"mock|antigravity"}}`
+4. `GET /health` -> `{"status":"ok","version":"0.1.0","uptime":<sec>,"timestamp":<iso>,"provider":{"mode":"antigravity"}}`
 
 Request validation (POST /v1/chat/completions):
 - `model`: required non-empty string.
@@ -213,7 +212,7 @@ necessary; the coordinator re-runs the full matrix after merge-back.
 - Vitest only; no network in tests (inject fetch stubs for provider HTTP; `app.inject()` for routes).
 - No live credentials, no paid calls, no sleeps > 100ms; deterministic.
 - Minimums per agent:
-  - provider (>= 8): mock determinism (stream deltas, usage, abort), token refresh
+  - provider (>= 8): Antigravity behavior (stream deltas, usage, abort), token refresh
     with fake fetch, upstream SSE parsing, error mapping, abort behavior.
   - api (>= 10): /v1/models, non-stream chat, stream chunk sequence + [DONE],
     validation 400s (3+), mid-stream error frame, /usage accumulation, one real-port
@@ -249,8 +248,8 @@ necessary; the coordinator re-runs the full matrix after merge-back.
   result. No autonomous fix loops.
 - Research budget: provider agent <= 15 OMP fetches; other agents make none.
 - "Verified" = you ran it and saw it pass. Never claim untested behavior works —
-  especially live Antigravity OAuth, which is UNVERIFIED here. Mock mode must be
-  fully tested.
+  especially live Antigravity OAuth, which is UNVERIFIED here. Provider behavior must be
+  covered using isolated test fixtures.
 - The Google ToS/account-risk statement must appear in docs touching the live path.
 - No Docker, no paid services, no cloud resources, no publishing/deploying.
 
@@ -382,7 +381,7 @@ Fail-closed rules (deployment agent implements in zod schema):
   take effect without restart.
 - `AIProvider.getAccountStatus?(): Promise<AntigravityAccountStatus>` — OPTIONAL additive
   method (types in src/types/admin.ts); implemented by AntigravityProvider; the admin
-  layer falls back to mode-based status when absent (e.g. mock).
+  layer falls back to mode-based status when absent (e.g. injected test providers).
 - **Auth hook bypass rule**: the Bearer auth hook skips exactly: `GET /health`,
   `OPTIONS *`, and ALL `/admin*` paths. `/admin` has its own session auth inside the
   admin plugin (login page + `POST /admin/login` + `GET /admin/oauth/callback` are the

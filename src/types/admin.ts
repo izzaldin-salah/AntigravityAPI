@@ -93,7 +93,7 @@ export interface OAuthService {
  * a sentinel refresh/access token value must never appear in any serialized response.
  */
 export interface AntigravityAccountStatus {
-  providerMode: "mock" | "antigravity";
+  providerMode: "antigravity";
   /** True when a refresh token or access token is available to the provider. */
   connected: boolean;
   hasRefreshToken: boolean;

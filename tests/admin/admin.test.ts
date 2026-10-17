@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../../src/app";
-import { MockProvider } from "../../src/providers/mock";
+import { MockTestProvider as TestProvider } from "../api/mock-provider";
 import { createCredentialStore } from "../../src/security/credential-store";
 import { createSessionStore } from "../../src/security/session-store";
 import type {
@@ -93,7 +93,7 @@ function createTestConfig(overrides?: Partial<AppConfig>): AppConfig {
     corsOrigins: "*",
     trustProxy: false,
     provider: {
-      mode: "mock",
+      mode: "antigravity", credentials: {},
     },
     admin: {
       enabled: true,
@@ -130,7 +130,7 @@ describe("Admin Dashboard & Routes", () => {
     });
     const app = await buildApp({
       config,
-      provider: new MockProvider(),
+      provider: new TestProvider(),
     });
 
     const res = await app.inject({
@@ -158,7 +158,7 @@ describe("Admin Dashboard & Routes", () => {
 
     const app = await buildApp({
       config,
-      provider: new MockProvider(),
+      provider: new TestProvider(),
       admin: { sessionStore, credentialStore, oauthService },
     });
 
@@ -209,7 +209,7 @@ describe("Admin Dashboard & Routes", () => {
 
     const app = await buildApp({
       config,
-      provider: new MockProvider(),
+      provider: new TestProvider(),
       admin: { sessionStore, credentialStore, oauthService },
     });
 
@@ -234,7 +234,7 @@ describe("Admin Dashboard & Routes", () => {
 
     const app = await buildApp({
       config,
-      provider: new MockProvider(),
+      provider: new TestProvider(),
       admin: { sessionStore, credentialStore, oauthService },
     });
 
@@ -270,7 +270,7 @@ describe("Admin Dashboard & Routes", () => {
 
     const app = await buildApp({
       config,
-      provider: new MockProvider(),
+      provider: new TestProvider(),
       admin: { sessionStore, credentialStore, oauthService },
     });
 
@@ -316,7 +316,7 @@ describe("Admin Dashboard & Routes", () => {
 
     const app = await buildApp({
       config,
-      provider: new MockProvider(),
+      provider: new TestProvider(),
       admin: { sessionStore, credentialStore, oauthService },
     });
 
@@ -355,7 +355,7 @@ describe("Admin Dashboard & Routes", () => {
 
     const app = await buildApp({
       config,
-      provider: new MockProvider(),
+      provider: new TestProvider(),
       admin: { sessionStore, credentialStore, oauthService },
     });
 
@@ -428,7 +428,7 @@ describe("Admin Dashboard & Routes", () => {
 
     const app = await buildApp({
       config,
-      provider: new MockProvider(),
+      provider: new TestProvider(),
       admin: { sessionStore, credentialStore, oauthService },
     });
 
@@ -489,10 +489,10 @@ describe("Admin Dashboard & Routes", () => {
     const credentialStore = createCredentialStore(config.credentials);
     const oauthService = new FakeOAuthService();
 
-    // MockProvider does not implement getAccountStatus
+    // TestProvider does not implement getAccountStatus
     const app = await buildApp({
       config,
-      provider: new MockProvider(),
+      provider: new TestProvider(),
       admin: { sessionStore, credentialStore, oauthService },
     });
 
@@ -507,9 +507,9 @@ describe("Admin Dashboard & Routes", () => {
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.enabled).toBe(true);
-    expect(body.providerMode).toBe("mock");
+    expect(body.providerMode).toBe("antigravity");
     expect(body.provider).toEqual({
-      providerMode: "mock",
+      providerMode: "antigravity",
       connected: false,
       hasRefreshToken: false,
       needsReconnect: false,
@@ -537,7 +537,7 @@ describe("Admin Dashboard & Routes", () => {
       accessTokenExpiresAt: Date.now() + 3600000,
     };
 
-    const mock = new MockProvider();
+    const mock = new TestProvider();
     const providerWithStatus: AIProvider = {
       id: mock.id,
       listModels: () => mock.listModels(),
@@ -577,7 +577,7 @@ describe("Admin Dashboard & Routes", () => {
 
     const app = await buildApp({
       config,
-      provider: new MockProvider(),
+      provider: new TestProvider(),
       admin: { sessionStore, credentialStore, oauthService },
     });
 
@@ -650,7 +650,7 @@ describe("Admin Dashboard & Routes", () => {
 
     const app = await buildApp({
       config,
-      provider: new MockProvider(),
+      provider: new TestProvider(),
       admin: { sessionStore, credentialStore, oauthService },
     });
 
@@ -753,7 +753,7 @@ describe("Admin Dashboard & Routes", () => {
 
     const app = await buildApp({
       config,
-      provider: new MockProvider(),
+      provider: new TestProvider(),
       admin: { sessionStore, credentialStore, oauthService },
     });
 
@@ -822,7 +822,7 @@ describe("Admin Dashboard & Routes", () => {
 
     const app = await buildApp({
       config,
-      provider: new MockProvider(),
+      provider: new TestProvider(),
       admin: { sessionStore, credentialStore, oauthService },
     });
 
@@ -892,7 +892,7 @@ describe("Admin Dashboard & Routes", () => {
 
     const app = await buildApp({
       config,
-      provider: new MockProvider(),
+      provider: new TestProvider(),
       admin: { sessionStore, credentialStore, oauthService },
     });
 
@@ -929,7 +929,7 @@ describe("Admin Dashboard & Routes", () => {
 
     const app = await buildApp({
       config,
-      provider: new MockProvider(),
+      provider: new TestProvider(),
       admin: { sessionStore, credentialStore, oauthService },
     });
 
@@ -970,7 +970,7 @@ describe("Admin Dashboard & Routes", () => {
 
     const app = await buildApp({
       config,
-      provider: new MockProvider(),
+      provider: new TestProvider(),
       admin: { sessionStore, credentialStore, oauthService },
     });
 
@@ -1045,7 +1045,7 @@ describe("Admin Dashboard & Routes", () => {
 
     const app = await buildApp({
       config,
-      provider: new MockProvider(),
+      provider: new TestProvider(),
       admin: { sessionStore, credentialStore, oauthService },
     });
 
@@ -1211,7 +1211,7 @@ describe("Admin Dashboard & Routes", () => {
 
     const app = await buildApp({
       config,
-      provider: new MockProvider(),
+      provider: new TestProvider(),
       admin: { sessionStore, credentialStore, oauthService },
     });
 

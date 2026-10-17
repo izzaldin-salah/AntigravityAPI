@@ -135,10 +135,12 @@ describe("Environment Configuration (tests/config/env.test.ts)", () => {
     expect(loadConfig({}).trustProxy).toBe(false);
   });
 
-  it("PROVIDER_MODE parsing -> mock or antigravity with credentials", () => {
-    const mock = loadConfig({ PROVIDER_MODE: "mock" });
-    expect(mock.provider.mode).toBe("mock");
+  it("defaults to Antigravity and rejects the removed mock mode", () => {
+    expect(loadConfig({}).provider.mode).toBe("antigravity");
+    expect(() => loadConfig({ PROVIDER_MODE: "mock" })).toThrowError(ConfigError);
+  });
 
+  it("loads Antigravity credentials", () => {
     const ag = loadConfig({
       PROVIDER_MODE: "antigravity",
       ANTIGRAVITY_REFRESH_TOKEN: "refresh-xyz",

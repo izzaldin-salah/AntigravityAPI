@@ -17,7 +17,7 @@ Example Response:
   "uptime": 42,
   "timestamp": "2026-10-17T07:45:00.000Z",
   "provider": {
-    "mode": "mock"
+    "mode": "antigravity"
   }
 }
 ```
@@ -36,7 +36,7 @@ Example Response:
   "object": "list",
   "data": [
     {
-      "id": "mock-model-1",
+      "id": "gemini-3.8-flash-high",
       "object": "model",
       "created": 1700000000,
       "owned_by": "personal-antigravity"
@@ -53,7 +53,7 @@ curl -i http://localhost:3000/v1/chat/completions \
   -H "Authorization: Bearer dev-local-key" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mock-model-1",
+    "model": "gemini-3.8-flash-high",
     "messages": [
       { "role": "system", "content": "You are a concise assistant." },
       { "role": "user", "content": "Hello!" }
@@ -68,7 +68,7 @@ Example Response:
   "id": "chatcmpl-0123456789abcdef0123456789abcdef",
   "object": "chat.completion",
   "created": 1700000000,
-  "model": "mock-model-1",
+  "model": "gemini-3.8-flash-high",
   "choices": [
     {
       "index": 0,
@@ -95,7 +95,7 @@ curl -N http://localhost:3000/v1/chat/completions \
   -H "Authorization: Bearer dev-local-key" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mock-model-1",
+    "model": "gemini-3.8-flash-high",
     "messages": [
       { "role": "user", "content": "Tell me a short joke." }
     ],
@@ -108,15 +108,15 @@ curl -N http://localhost:3000/v1/chat/completions \
 
 Example Stream output:
 ```text
-data: {"id":"chatcmpl-...","object":"chat.completion.chunk","created":1700000000,"model":"mock-model-1","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","created":1700000000,"model":"gemini-3.8-flash-high","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
 
-data: {"id":"chatcmpl-...","object":"chat.completion.chunk","created":1700000000,"model":"mock-model-1","choices":[{"index":0,"delta":{"content":"Why do programmers "},"finish_reason":null}]}
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","created":1700000000,"model":"gemini-3.8-flash-high","choices":[{"index":0,"delta":{"content":"Why do programmers "},"finish_reason":null}]}
 
-data: {"id":"chatcmpl-...","object":"chat.completion.chunk","created":1700000000,"model":"mock-model-1","choices":[{"index":0,"delta":{"content":"prefer dark mode?"},"finish_reason":null}]}
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","created":1700000000,"model":"gemini-3.8-flash-high","choices":[{"index":0,"delta":{"content":"prefer dark mode?"},"finish_reason":null}]}
 
-data: {"id":"chatcmpl-...","object":"chat.completion.chunk","created":1700000000,"model":"mock-model-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","created":1700000000,"model":"gemini-3.8-flash-high","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
 
-data: {"id":"chatcmpl-...","object":"chat.completion.chunk","created":1700000000,"model":"mock-model-1","choices":[],"usage":{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20}}
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","created":1700000000,"model":"gemini-3.8-flash-high","choices":[],"usage":{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20}}
 
 data: [DONE]
 ```
@@ -139,7 +139,7 @@ Example Response:
     "completion_tokens": 18,
     "total_tokens": 45,
     "by_model": {
-      "mock-model-1": {
+      "gemini-3.8-flash-high": {
         "requests": 2,
         "prompt_tokens": 27,
         "completion_tokens": 18,

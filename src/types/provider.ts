@@ -134,7 +134,7 @@ export interface AIProvider {
   healthCheck?(): Promise<ProviderHealth>;
   /**
    * v1.1 additive: account status for the admin dashboard (never includes tokens).
-   * Implemented by AntigravityProvider; optional elsewhere (e.g. mock).
+   * Implemented by AntigravityProvider; optional for injected test providers.
    */
   getAccountStatus?(): Promise<import("./admin").AntigravityAccountStatus>;
 }

@@ -116,10 +116,10 @@ const envSchema = z.object({
     }),
 
   PROVIDER_MODE: z
-    .enum(["mock", "antigravity"], {
-      message: "PROVIDER_MODE must be 'mock' or 'antigravity'",
+    .enum(["antigravity"], {
+      message: "PROVIDER_MODE must be 'antigravity'",
     })
-    .default("mock"),
+    .default("antigravity"),
 
   ANTIGRAVITY_ACCESS_TOKEN: z.string().optional(),
   ANTIGRAVITY_REFRESH_TOKEN: z.string().optional(),
@@ -335,10 +335,10 @@ export function loadConfigWithDiagnostics(
     max: validated.RATE_LIMIT_MAX,
   };
 
-  const provider: ProviderConfig =
-    validated.PROVIDER_MODE === "antigravity"
-      ? { mode: "antigravity", credentials: pickAntigravity(validated) }
-      : { mode: "mock" };
+  const provider: ProviderConfig = {
+    mode: "antigravity",
+    credentials: pickAntigravity(validated),
+  };
 
   const scopesRaw = validated.ANTIGRAVITY_OAUTH_SCOPES?.trim();
   const oauthScopes = scopesRaw

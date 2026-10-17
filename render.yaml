@@ -14,7 +14,7 @@ services:
       - key: NODE_ENV
         value: production
       - key: PROVIDER_MODE
-        value: mock
+        value: antigravity
       - key: TRUST_PROXY
         value: "true"
       - key: LOG_LEVEL

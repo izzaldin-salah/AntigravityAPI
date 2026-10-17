@@ -18,14 +18,7 @@ async function main(): Promise<void> {
   const credentialStore = createCredentialStore(config.credentials);
   const sessionStore = createSessionStore();
 
-  const clientId =
-    config.provider.mode === "antigravity"
-      ? config.provider.credentials.clientId
-      : undefined;
-  const clientSecret =
-    config.provider.mode === "antigravity"
-      ? config.provider.credentials.clientSecret
-      : undefined;
+  const { clientId, clientSecret } = config.provider.credentials;
 
   const oauthService = createOAuthService({
     clientId,

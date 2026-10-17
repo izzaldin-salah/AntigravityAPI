@@ -18,6 +18,8 @@ import {
   verifyAdminPassword,
 } from "./auth";
 import { OAuthStateManager } from "./oauth-state";
+import { RequestTracker } from "../core/request-tracker";
+import { registerOperations } from "./operations";
 import {
   renderDashboardPage,
   renderErrorPage,
@@ -30,6 +32,7 @@ export interface AdminDashboardDeps {
   sessionStore: SessionStore;
   credentialStore: CredentialStore;
   oauthService: OAuthService;
+  requestTracker?: RequestTracker;
 }
 
 interface FlashMessage {
@@ -44,6 +47,8 @@ export function createAdminRoutes(
   const { config, provider, sessionStore, credentialStore, oauthService } =
     deps;
   const oauthStateManager = new OAuthStateManager();
+  const requestTracker = deps.requestTracker ?? new RequestTracker();
+  registerOperations(app, { config, provider, sessionStore, requestTracker });
   const flashMessages = new Map<string, FlashMessage>();
 
   const loginLimiter = createFixedWindowLimiter({
@@ -241,7 +246,16 @@ export function createAdminRoutes(
 
     const credHealth = await credentialStore.health();
     const flash = popFlash(session.id);
+    const models = await provider.listModels().catch(() => []);
+    let baseUrl = `${request.protocol}://${request.host}`;
+    if (config.oauth.redirectBaseUrl) {
+      try {
+        const configured = new URL(config.oauth.redirectBaseUrl);
+        if (["http:", "https:"].includes(configured.protocol) && !configured.username && !configured.password) baseUrl = configured.origin;
+      } catch { /* Use the current request origin when configuration is invalid. */ }
+    }
 
+    reply.header("Cache-Control", "no-store");
     reply.header("Content-Type", "text/html; charset=utf-8");
     return reply.send(
       renderDashboardPage({
@@ -250,6 +264,12 @@ export function createAdminRoutes(
         oauthConfigured: oauthService.isConfigured(),
         csrfToken: session.csrfToken,
         flash,
+        operations: {
+          snapshot: requestTracker.snapshot(), baseUrl, models: models.map(model => model.id),
+          apiKeyCount: config.apiKeys.length, isRender: process.env.RENDER === "true",
+          encryptedStore: Boolean(config.credentials.encryptionKey),
+          hasTokenCache: Boolean(config.provider.credentials.tokenStorePath),
+        },
       }),
     );
   });
@@ -418,8 +438,8 @@ export function createAdminRoutes(
     }
     try {
       const result = await oauthService.exchangeCode({ code, codeVerifier: pending.codeVerifier, redirectUri: expected });
-      const clientId = config.provider.mode === "antigravity" ? config.provider.credentials.clientId : undefined;
-      const clientSecret = config.provider.mode === "antigravity" ? config.provider.credentials.clientSecret : undefined;
+      const clientId = config.provider.credentials.clientId;
+      const clientSecret = config.provider.credentials.clientSecret;
       await credentialStore.save({
         refreshToken: result.refreshToken,
         clientId,
@@ -546,13 +566,9 @@ export function createAdminRoutes(
       });
 
       const clientId =
-        config.provider.mode === "antigravity"
-          ? config.provider.credentials.clientId
-          : undefined;
+        config.provider.credentials.clientId;
       const clientSecret =
-        config.provider.mode === "antigravity"
-          ? config.provider.credentials.clientSecret
-          : undefined;
+        config.provider.credentials.clientSecret;
 
       await credentialStore.save({
         refreshToken: result.refreshToken,
