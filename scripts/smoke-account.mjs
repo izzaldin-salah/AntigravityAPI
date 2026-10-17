@@ -258,9 +258,10 @@ async function main() {
       accept: "application/json",
     });
     const cookie = login.setCookies.find((c) => c.startsWith("admin_session=")) ?? "";
+    // Form flow answers 302; JSON mode answers 200 with the cookie set. Both are valid.
     check(
-      "login success -> redirect + session cookie",
-      (login.status === 302 || login.status === 303) && cookie.length > 0,
+      "login success -> session cookie issued (302 form / 200 JSON)",
+      (login.status === 302 || login.status === 303 || login.status === 200) && cookie.length > 0,
       `status=${login.status}`,
     );
     check(

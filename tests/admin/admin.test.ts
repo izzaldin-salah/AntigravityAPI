@@ -1,3 +1,6 @@
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../../src/app";
 import { MockProvider } from "../../src/providers/mock";
@@ -101,7 +104,9 @@ function createTestConfig(overrides?: Partial<AppConfig>): AppConfig {
     },
     credentials: {
       backend: "file",
-      filePath: "./.data/test-cred.json",
+      // Unique temp path per test config: the real store persists to disk,
+      // so a shared path would leak credentials across tests.
+      filePath: join(tmpdir(), "agapi-admin-tests", `cred-${randomUUID()}.json`),
       encryptionKey: "test-encryption-key-for-credentials",
     },
     oauth: {
@@ -509,7 +514,7 @@ describe("Admin Dashboard & Routes", () => {
       hasRefreshToken: false,
       needsReconnect: false,
     });
-    expect(body.credentials.backend).toBe("memory");
+    expect(body.credentials.backend).toBe("file");
     expect(body.credentials.ok).toBe(true);
     expect(body.oauth.configured).toBe(true);
     expect(body.oauth.redirectUri).toBe(

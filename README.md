@@ -17,8 +17,10 @@ Native Node.js deployment on **Render Free — no Docker**.
 | Area | State |
 | --- | --- |
 | Build + typecheck (`strict`) | ✅ verified |
-| Unit/integration tests (12 files, 71 tests) | ✅ verified |
+| Unit/integration tests (19 files, 139 tests) | ✅ verified |
 | End-to-end HTTP smoke (`npm run smoke:e2e`, 16 checks) | ✅ verified |
+| Account dashboard e2e (`npm run smoke:account`, 32 checks) | ✅ verified |
+| Account dashboard: login, CSRF, rate limiting, encrypted credential store | ✅ verified (offline, fake OAuth server) |
 | Mock provider mode (`PROVIDER_MODE=mock`) | ✅ verified end-to-end |
 | Auth, rate limiting, CORS, log redaction | ✅ verified |
 | Live Antigravity OAuth / upstream calls | 🧪 experimental, unverified |
@@ -28,8 +30,9 @@ Native Node.js deployment on **Render Free — no Docker**.
 ```bash
 npm ci
 npm run build
-npm test              # 71 unit/integration tests (offline)
+npm test              # 139 unit/integration tests (offline)
 npm run smoke:e2e     # end-to-end check of the built server (needs build)
+npm run smoke:account # full account-dashboard workflow vs a fake OAuth server
 npm start             # http://0.0.0.0:3000  (mock provider by default)
 # or: npm run dev     # tsx watch, same behavior
 ```
@@ -66,6 +69,47 @@ More: [`tests/api/EXAMPLES.md`](tests/api/EXAMPLES.md).
 | GET | `/v1/models` | ✅ | OpenAI list format |
 | POST | `/v1/chat/completions` | ✅ | streaming + non-streaming |
 | GET | `/usage` | ✅ | local counters + provider usage |
+| GET/POST | `/admin*` | session | account dashboard (own login, CSRF, rate limiting) |
+
+## Account dashboard (`/admin`)
+
+A minimal, password-protected dashboard for managing the Antigravity account
+connection — account changes take effect without redeploying.
+
+```bash
+# 1. Generate an admin password hash (preferred) and an encryption key
+node scripts/hash-admin-password.mjs "your admin password"
+node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+
+# 2. Start with the dashboard enabled (or ADMIN_PASSWORD for a plaintext dev password)
+ADMIN_PASSWORD_HASH='scrypt$...' CREDENTIAL_ENCRYPTION_KEY='...' npm start
+```
+
+Open `http://localhost:3000/admin`, log in, and you can:
+
+- see account status: `disconnected` / `connected` / `needs_reconnect` (plus
+  access-token expiry, project, masked account hint, store health);
+- **connect with browser OAuth** (Authorization Code + PKCE) when your own
+  Google OAuth client is configured (`ANTIGRAVITY_CLIENT_ID`, optional secret) —
+  if Google rejects the client or scopes, the exact error is shown and the
+  manual path stays available;
+- **paste a refresh token** manually — validated with a live token refresh
+  before anything is stored, so a bad token never replaces a good one;
+- reconnect, switch accounts (disconnect → connect), and log out.
+
+Security invariants: OAuth tokens are never exposed to the browser or API
+clients (sentinel-tested in the suite), the credential blob is AES-256-GCM
+encrypted at rest, admin sessions are HttpOnly/SameSite=Lax with per-session
+CSRF tokens, login attempts are rate-limited (429 + `Retry-After`), and
+`/admin` uses session auth only — API keys stay required for `/v1/**` and
+`/usage`. Sessions are in-memory (lost on restart → log in again).
+
+Durability on Render Free: the `file` store is **ephemeral** — credentials are
+lost on restart (reconnect via the dashboard). Set `REDIS_URL` (a free Render
+Key Value instance, or any external Redis-compatible URL) for durable storage
+and account switching without redeploys. Full setup:
+[`docs/deployment.md`](docs/deployment.md) · threat model:
+[`docs/security.md`](docs/security.md).
 
 ## Configuration
 
@@ -103,17 +147,18 @@ can take 30–60 s. Full guide: [`docs/deployment.md`](docs/deployment.md).
 ```
 src/
 ├── api/         # OpenAI request validation + normalization
+├── admin/       # account dashboard: routes, sessions, CSRF use, HTML pages
 ├── core/        # usage tracker, chunk mapping, error envelope, ids
 ├── routes/      # /v1/chat/completions, /v1/models, /usage, /health
-├── providers/   # AIProvider implementations: mock + antigravity (+ SSE, tokens)
+├── providers/   # AIProvider implementations: mock + antigravity (+ OAuth, SSE, tokens)
 ├── middleware/  # auth, rate limit, CORS, error handler
-├── security/    # redaction, ephemeral token store
+├── security/    # redaction, token store, encrypted credential store, redis-lite
 ├── config/      # zod-validated environment loader
-├── types/       # frozen shared contracts (provider/config/openai)
+├── types/       # frozen shared contracts (provider/config/openai/admin)
 ├── app.ts       # Fastify app builder (routes only)
 └── server.ts    # composition root
-tests/           # vitest: api/, providers/, security/, config/, smoke
-scripts/         # smoke-e2e.mjs (coordinator end-to-end check)
+tests/           # vitest: api/, admin/, providers/, security/, config/, smoke
+scripts/         # smoke-e2e.mjs + smoke-account.mjs + hash-admin-password.mjs
 ```
 
 ## License

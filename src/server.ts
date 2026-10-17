@@ -11,9 +11,6 @@ import { createProviderFromConfig } from "./providers";
 import { createOAuthService } from "./providers/oauth";
 import { createCredentialStore } from "./security/credential-store";
 import { createSessionStore } from "./security/session-store";
-import type { CredentialStore } from "./types/admin";
-import type { ProviderConfig } from "./types/config";
-import type { AIProvider } from "./types/provider";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -38,12 +35,7 @@ async function main(): Promise<void> {
     tokenEndpoint: config.oauth.tokenEndpoint,
   });
 
-  const providerFactory = createProviderFromConfig as unknown as (
-    providerConfig: ProviderConfig,
-    deps?: { credentialStore?: CredentialStore; tokenEndpoint?: string },
-  ) => AIProvider;
-
-  const provider = providerFactory(config.provider, {
+  const provider = createProviderFromConfig(config.provider, {
     credentialStore,
     tokenEndpoint: config.oauth.tokenEndpoint,
   });
