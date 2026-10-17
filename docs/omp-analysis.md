@@ -102,56 +102,30 @@ OMP packages requests inside a Cloud Code Assist wrapper:
     },
     "generationConfig": {
       "temperature": 0.7,
-      "topP": 0.95,
-      "maxOutputTokens": 4096
+      "maxOutputTokens": 2048
     },
-    "sessionId": "<signed-decimal-or-random>",
+    "sessionId": "session_1234567890",
     "labels": {
-      "last_step_index": "1",
-      "trajectory_id": "<uuid>"
+      "trajectory_id": "traj_abc",
+      "last_step_index": "1"
     }
   },
   "userAgent": "antigravity",
   "requestType": "agent",
-  "requestId": "agent/<uuid>/<timestamp>/<uuid>/2"
+  "requestId": "agent/gw/1234567890/abc/1"
 }
 ```
 
 ---
 
-## 5. Streaming Response Handling (SSE)
+## 5. Streaming Semantics & Event Normalization
 
-### 5.1 Protocol Parsing
-- Server emits `Content-Type: text/event-stream`.
-- Frames start with `data: <JSON>\n\n`.
-- Expected chunk format:
-  ```json
-  {
-    "response": {
-      "candidates": [
-        {
-          "content": {
-            "role": "model",
-            "parts": [
-              {
-                "text": "Hello! How can I help you today?",
-                "thought": false
-              }
-            ]
-          },
-          "finishReason": "STOP"
-        }
-      ],
-      "usageMetadata": {
-        "promptTokenCount": 12,
-        "candidatesTokenCount": 8,
-        "thoughtsTokenCount": 0,
-        "totalTokenCount": 20
-      },
-      "responseId": "resp_12345"
-    }
-  }
-  ```
+### 5.1 Upstream Server-Sent Events (SSE) Wire Format
+Upstream streams frames of the form:
+```
+data: {"response":{"responseId":"...","candidates":[{"content":{"parts":[{"text":"chunk"}]},"finishReason":"STOP"}]}}
+```
+OMP inspects `candidate.finishReason` and filters `thought: true` parts during ordinary user generation.
 
 ### 5.2 Stream Events Mapping to `ProviderEvent`
 1. **Start:** Emit `{ type: "start", id, model, created }` upon receiving first valid response chunk.
@@ -171,7 +145,7 @@ OMP is written specifically for the Bun runtime with tight internal monorepo dep
 - Runtime dependencies: `Bun.sleep`, `bun:sqlite`.
 
 **Translation for `personal-antigravity-api` (Node 24 + TypeScript):**
-- Use standard `node:crypto` (`randomUUID`, `createHash`) for ID generation.
+- Use standard `node:crypto` (`randomUUID`, `createHash`, `randomBytes`) for ID generation, PKCE pairs, and secret hashing.
 - Use native `timers/promises` for timeouts/delays.
 - Use global `fetch` (with dependency injection for testing).
 - Use Node 16 CommonJS output module resolution.
@@ -204,9 +178,10 @@ However, because live credentials may be absent or network access restricted, `A
 | --- | --- |
 | `id` | `"antigravity"` |
 | `listModels()` | Returns static fallback models, or queries `/v1internal:fetchAvailableModels` when live token is present. |
-| `chat(request)` | Returns `AsyncIterable<ProviderEvent>`, managing token lifecycle, request encoding, SSE parsing, and canonical error mapping. |
+| `chat(request)` | Returns `AsyncIterable<ProviderEvent>`, managing token lifecycle, request encoding, SSE parsing, and canonical error mapping. Fails fast pointing to `/admin` when `needsReconnect` is true. |
 | `getUsage()` | Returns accumulated session usage or queries `/v1internal:retrieveUserQuotaSummary`. |
 | `healthCheck()` | Returns `{ ok: true, detail: "..." }`. |
+| `getAccountStatus()` | *(v1.1 additive)* Returns `AntigravityAccountStatus` (providerMode, connected, hasRefreshToken, accessTokenExpiresAt, projectId, clientIdMasked, needsReconnect, lastRefreshAt, lastError) — strictly whitelisted, zero secrets leaked. |
 
 ---
 
@@ -217,3 +192,25 @@ Because no live Google Antigravity credentials or live cloud environment are ava
 2. **Project Auto-Provisioning:** Whether calling `/v1internal:onboardUser` succeeds automatically for arbitrary Google accounts without manual web console acceptance.
 3. **Session ID & Trajectory Labels:** Whether the upstream service strictly requires `labels.trajectory_id` and `sessionId` in specific formats to prevent server-side rejection.
 4. **Third-Party Model Availability:** Whether Claude models remain enabled and reachable on the same endpoint across all tiers without specific enterprise grants.
+5. **Live Google OAuth Authorization:** Whether arbitrary user Google accounts can authorize the unofficial client scopes without Google consent verification blockers.
+
+---
+
+## 11. v1.1 Account Management Dashboard & OAuth Service Architecture
+
+### 11.1 Google OAuth 2.0 PKCE & Authorization Code Flow
+- **Seam:** `createOAuthService(options: OAuthServiceOptions): OAuthService` in `src/providers/oauth.ts`.
+- **PKCE Pair Generation:** Generates a 43+ char base64url random verifier (`crypto.randomBytes(32)`) and an S256 code challenge (`crypto.createHash("sha256").update(verifier).digest("base64url")`).
+- **Authorize URL Construction:** Uses Google authorization endpoint (`https://accounts.google.com/o/oauth2/v2/auth`, overridable for tests) with `response_type=code`, `access_type=offline`, `prompt=consent`, `code_challenge_method=S256`.
+- **Code Exchange:** Server-to-server POST to `tokenEndpoint` (`https://oauth2.googleapis.com/token`, overridable for tests). Requires a `refresh_token` in response; decodes only the `id_token` payload to derive a safe, masked `accountHint` (e.g. `u***@domain.com`). Never logs or leaks token bodies.
+- **Test Refresh:** Validates operator-supplied refresh tokens before storage via a direct POST with `grant_type=refresh_token`.
+
+### 11.2 Credential Store & Dynamic Resolution
+- **Request-time Resolution:**
+  1. Constructor env credentials (if provided).
+  2. `credentialStore.load()` cached in memory (picked up on next request without restart).
+  3. No credentials -> fail fast with `ProviderError` unauthorized pointing to `/admin`.
+- **needsReconnect State Machine:**
+  - Transition to `true` when a token refresh is rejected (400/401 / `invalid_grant`) with redacted error message.
+  - Fail fast on `chat()` without making unauthenticated upstream network calls.
+  - Transition to `false` when a refresh succeeds or when new credentials are saved/loaded from the store.
