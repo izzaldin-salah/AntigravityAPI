@@ -1,7 +1,7 @@
 /**
  * API Key Authentication Middleware.
  * Owner: antigravity-deployment-agent.
- * Frozen contract: docs/architecture-contract.md (§7, §9).
+ * Frozen contract: docs/architecture-contract.md (§7, §9, §15).
  */
 import * as crypto from "node:crypto";
 import type { FastifyReply, FastifyRequest } from "fastify";
@@ -38,18 +38,23 @@ export function timingSafeKeyMatch(candidateKey: string, allowedKeys: string[]):
 
 /**
  * Checks if the request should bypass authentication.
- * Bypasses:
+ * Bypasses (contract §15):
  *  - OPTIONS requests (CORS preflight)
- *  - GET /health
+ *  - ALL /admin paths (any method; the admin plugin enforces its own session auth)
+ *  - GET /health (query parameters tolerated)
  */
 export function isAuthBypassed(request: FastifyRequest): boolean {
   if (request.method === "OPTIONS") {
     return true;
   }
 
+  const pathname = request.url.split("?")[0];
+  if (pathname === "/admin" || pathname.startsWith("/admin/")) {
+    return true;
+  }
+
   if (request.method === "GET") {
-    const url = request.url;
-    if (url === "/health" || url.startsWith("/health?")) {
+    if (pathname === "/health") {
       return true;
     }
   }

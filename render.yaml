@@ -19,8 +19,22 @@ services:
         value: "true"
       - key: LOG_LEVEL
         value: info
+      - key: DASHBOARD_ENABLED
+        value: auto
+      - key: CREDENTIAL_STORE
+        value: auto
       # Secrets and sensitive variables configured directly in Render Dashboard (never committed)
       - key: API_KEYS
+        sync: false
+      - key: ADMIN_PASSWORD_HASH
+        sync: false
+      - key: CREDENTIAL_ENCRYPTION_KEY
+        sync: false
+      # Public base URL for OAuth callback, e.g. https://personal-antigravity-api.onrender.com
+      - key: OAUTH_REDIRECT_BASE_URL
+        sync: false
+      # Paste from a free Render Key Value instance or any external Redis-compatible URL (e.g. Upstash rediss://...)
+      - key: REDIS_URL
         sync: false
       - key: ANTIGRAVITY_REFRESH_TOKEN
         sync: false
