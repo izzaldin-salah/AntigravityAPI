@@ -177,3 +177,66 @@ export function createRateLimitHook(config: AppConfig, limiter?: InMemoryRateLim
     }
   };
 }
+
+/**
+ * v1.1 seam (architecture contract §15) — generic fixed-window limiter used by
+ * the admin login gate. STUB: owner antigravity-deployment-agent refines and
+ * tests it during the dashboard wave; behavior/signature is frozen.
+ *
+ * `max: 0` disables limiting (always allowed).
+ */
+export function createFixedWindowLimiter(opts: {
+  windowMs: number;
+  max: number;
+}): (key: string) => {
+  allowed: boolean;
+  retryAfterSeconds: number;
+  remaining: number;
+  limit: number;
+} {
+  const store = new Map<string, RateLimitEntry>();
+
+  return (key: string) => {
+    const now = Date.now();
+
+    if (opts.max === 0) {
+      return { allowed: true, retryAfterSeconds: 0, remaining: 0, limit: 0 };
+    }
+
+    // Lazy prune to keep memory bounded under traffic.
+    if (store.size > 2000) {
+      for (const [k, v] of store.entries()) {
+        if (now >= v.resetAt) store.delete(k);
+      }
+    }
+
+    let entry = store.get(key);
+    if (!entry || now >= entry.resetAt) {
+      entry = { count: 1, resetAt: now + opts.windowMs };
+      store.set(key, entry);
+      return {
+        allowed: true,
+        retryAfterSeconds: 0,
+        remaining: Math.max(0, opts.max - 1),
+        limit: opts.max,
+      };
+    }
+
+    if (entry.count < opts.max) {
+      entry.count += 1;
+      return {
+        allowed: true,
+        retryAfterSeconds: 0,
+        remaining: Math.max(0, opts.max - entry.count),
+        limit: opts.max,
+      };
+    }
+
+    return {
+      allowed: false,
+      retryAfterSeconds: Math.max(1, Math.ceil((entry.resetAt - now) / 1000)),
+      remaining: 0,
+      limit: opts.max,
+    };
+  };
+}
