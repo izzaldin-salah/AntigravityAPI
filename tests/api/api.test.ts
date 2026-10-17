@@ -14,6 +14,14 @@ const testConfig: AppConfig = {
   corsOrigins: "*",
   trustProxy: false,
   provider: { mode: "mock" },
+  admin: {
+    enabled: false,
+    sessionTtlMs: 43200000,
+    loginWindowMs: 300000,
+    loginMax: 5,
+  },
+  credentials: { backend: "auto", filePath: "./.data/credential-store.json" },
+  oauth: { scopes: [] },
 };
 
 describe("personal-antigravity-api API endpoints", () => {

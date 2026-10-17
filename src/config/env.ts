@@ -4,7 +4,7 @@
  * Frozen contract: docs/architecture-contract.md (§6).
  */
 import { z } from "zod";
-import { DEFAULT_DEV_API_KEY } from "../types/config";
+import { DEFAULT_DEV_API_KEY, DEFAULT_OAUTH_SCOPES } from "../types/config";
 import type {
   AntigravityCredentials,
   AppConfig,
@@ -133,6 +133,93 @@ const envSchema = z.object({
     .transform((val) =>
       val && val.trim().length > 0 ? val.trim() : "./.data/antigravity-token.json",
     ),
+
+  // ---- v1.1 account dashboard (see architecture contract §14) ----
+
+  DASHBOARD_ENABLED: z
+    .enum(["auto", "true", "false"], {
+      message: "DASHBOARD_ENABLED must be 'auto', 'true' or 'false'",
+    })
+    .default("auto"),
+
+  ADMIN_PASSWORD: z.string().optional(),
+  ADMIN_PASSWORD_HASH: z.string().optional(),
+
+  ADMIN_SESSION_TTL_MS: z
+    .string()
+    .or(z.number())
+    .optional()
+    .transform((val, ctx) => {
+      if (val === undefined || val === null || val === "") return 43200000;
+      const num = typeof val === "number" ? val : Number(String(val).trim());
+      if (!Number.isInteger(num) || num <= 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `ADMIN_SESSION_TTL_MS must be a positive integer, received "${val}"`,
+        });
+        return z.NEVER;
+      }
+      return num;
+    }),
+
+  ADMIN_LOGIN_WINDOW_MS: z
+    .string()
+    .or(z.number())
+    .optional()
+    .transform((val, ctx) => {
+      if (val === undefined || val === null || val === "") return 300000;
+      const num = typeof val === "number" ? val : Number(String(val).trim());
+      if (!Number.isInteger(num) || num <= 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `ADMIN_LOGIN_WINDOW_MS must be a positive integer, received "${val}"`,
+        });
+        return z.NEVER;
+      }
+      return num;
+    }),
+
+  ADMIN_LOGIN_MAX: z
+    .string()
+    .or(z.number())
+    .optional()
+    .transform((val, ctx) => {
+      if (val === undefined || val === null || val === "") return 5;
+      const num = typeof val === "number" ? val : Number(String(val).trim());
+      if (!Number.isInteger(num) || num < 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `ADMIN_LOGIN_MAX must be a non-negative integer (0 disables the login gate), received "${val}"`,
+        });
+        return z.NEVER;
+      }
+      return num;
+    }),
+
+  CREDENTIAL_STORE: z
+    .enum(["auto", "file", "redis"], {
+      message: "CREDENTIAL_STORE must be 'auto', 'file' or 'redis'",
+    })
+    .default("auto"),
+
+  REDIS_URL: z.string().optional(),
+
+  CREDENTIAL_FILE_PATH: z
+    .string()
+    .optional()
+    .transform((val) =>
+      val && val.trim().length > 0 ? val.trim() : "./.data/credential-store.json",
+    ),
+
+  CREDENTIAL_ENCRYPTION_KEY: z.string().optional(),
+
+  OAUTH_REDIRECT_BASE_URL: z.string().optional(),
+
+  ANTIGRAVITY_OAUTH_SCOPES: z.string().optional(),
+
+  ANTIGRAVITY_OAUTH_AUTH_ENDPOINT: z.string().optional(),
+
+  ANTIGRAVITY_OAUTH_TOKEN_ENDPOINT: z.string().optional(),
 });
 
 function pickAntigravity(env: z.infer<typeof envSchema>): AntigravityCredentials {
@@ -185,6 +272,36 @@ export function loadConfigWithDiagnostics(
     }
   }
 
+  // ---- v1.1 dashboard fail-closed rules ----
+  const adminPasswordRaw = parsed?.ADMIN_PASSWORD?.trim() || undefined;
+  const adminPasswordHashRaw = parsed?.ADMIN_PASSWORD_HASH?.trim() || undefined;
+  const encryptionKeyRaw = parsed?.CREDENTIAL_ENCRYPTION_KEY?.trim() || undefined;
+  const dashboardEnabledExplicit = parsed?.DASHBOARD_ENABLED;
+  const hasAdminSecret = Boolean(adminPasswordRaw || adminPasswordHashRaw);
+  const dashboardEnabled =
+    dashboardEnabledExplicit === "true"
+      ? true
+      : dashboardEnabledExplicit === "false"
+        ? false
+        : hasAdminSecret;
+
+  if (adminPasswordHashRaw && !adminPasswordHashRaw.startsWith("scrypt$")) {
+    issues.push(
+      "ADMIN_PASSWORD_HASH: expected format 'scrypt$N$r$p$<saltB64>$<hashB64>' (generate with: node scripts/hash-admin-password.mjs)",
+    );
+  }
+  if (dashboardEnabledExplicit === "true" && !hasAdminSecret) {
+    issues.push("DASHBOARD_ENABLED=true requires ADMIN_PASSWORD or ADMIN_PASSWORD_HASH.");
+  }
+  if (dashboardEnabled && !encryptionKeyRaw) {
+    issues.push(
+      "CREDENTIAL_ENCRYPTION_KEY is REQUIRED when the admin dashboard is enabled (fail closed). Generate one with: node -e \"console.log(require('crypto').randomBytes(32).toString('base64'))\"",
+    );
+  }
+  if (parsed?.CREDENTIAL_STORE === "redis" && !parsed.REDIS_URL?.trim()) {
+    issues.push("CREDENTIAL_STORE=redis requires REDIS_URL.");
+  }
+
   if (issues.length > 0) {
     throw new ConfigError(
       `Invalid environment configuration:\n  - ${issues.join("\n  - ")}`,
@@ -223,6 +340,14 @@ export function loadConfigWithDiagnostics(
       ? { mode: "antigravity", credentials: pickAntigravity(validated) }
       : { mode: "mock" };
 
+  const scopesRaw = validated.ANTIGRAVITY_OAUTH_SCOPES?.trim();
+  const oauthScopes = scopesRaw
+    ? scopesRaw
+        .split(/[\s,]+/)
+        .map((s) => s.trim())
+        .filter(Boolean)
+    : [...DEFAULT_OAUTH_SCOPES];
+
   const config: AppConfig = {
     nodeEnv,
     host: validated.HOST,
@@ -233,6 +358,26 @@ export function loadConfigWithDiagnostics(
     corsOrigins,
     trustProxy: validated.TRUST_PROXY,
     provider,
+    admin: {
+      enabled: dashboardEnabled,
+      password: adminPasswordRaw,
+      passwordHash: adminPasswordHashRaw,
+      sessionTtlMs: validated.ADMIN_SESSION_TTL_MS,
+      loginWindowMs: validated.ADMIN_LOGIN_WINDOW_MS,
+      loginMax: validated.ADMIN_LOGIN_MAX,
+    },
+    credentials: {
+      backend: validated.CREDENTIAL_STORE,
+      redisUrl: validated.REDIS_URL?.trim() || undefined,
+      filePath: validated.CREDENTIAL_FILE_PATH,
+      encryptionKey: encryptionKeyRaw,
+    },
+    oauth: {
+      redirectBaseUrl: validated.OAUTH_REDIRECT_BASE_URL?.trim() || undefined,
+      scopes: oauthScopes,
+      authEndpoint: validated.ANTIGRAVITY_OAUTH_AUTH_ENDPOINT?.trim() || undefined,
+      tokenEndpoint: validated.ANTIGRAVITY_OAUTH_TOKEN_ENDPOINT?.trim() || undefined,
+    },
   };
 
   return { config, warnings };

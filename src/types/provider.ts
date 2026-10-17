@@ -132,6 +132,11 @@ export interface AIProvider {
   chat(request: NormalizedChatRequest): AsyncIterable<ProviderEvent>;
   getUsage(): Promise<UsageInfo>;
   healthCheck?(): Promise<ProviderHealth>;
+  /**
+   * v1.1 additive: account status for the admin dashboard (never includes tokens).
+   * Implemented by AntigravityProvider; optional elsewhere (e.g. mock).
+   */
+  getAccountStatus?(): Promise<import("./admin").AntigravityAccountStatus>;
 }
 
 export class ProviderError extends Error {

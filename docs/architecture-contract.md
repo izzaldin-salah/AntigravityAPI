@@ -1,6 +1,6 @@
 # Architecture Contract — personal-antigravity-api
 
-Version: 1.0 (frozen for the 3-agent build) · Owner: coordinator · Status: FROZEN
+Version: 1.1 (frozen for the 3-agent build + account-dashboard wave) · Owner: coordinator · Status: FROZEN
 
 ## 0. How to use this document
 
@@ -52,9 +52,10 @@ All agents share the same scripts: `npm run typecheck`, `npm test`, `npm run bui
 | Zone | Owner | Notes |
 | --- | --- | --- |
 | package.json, package-lock.json, tsconfig.json, tsconfig.build.json, .gitignore, README.md, docs/architecture-contract.md, src/types/** | coordinator | FROZEN for agents |
-| src/app.ts, src/server.ts, src/api/**, src/routes/**, src/core/**, tests/api/** | antigravity-api-agent | replaces scaffold placeholders src/app.ts + src/server.ts |
-| src/providers/**, tests/providers/**, docs/omp-analysis.md | antigravity-provider-agent | replaces stub src/providers/index.ts; may extend src/types/provider.ts additively only |
-| src/config/**, src/middleware/**, src/security/**, tests/config/**, tests/security/**, docs/deployment.md, docs/security.md, render.yaml, .env.example | antigravity-deployment-agent | replaces stubs src/config/env.ts + src/middleware/index.ts |
+| src/app.ts, src/server.ts, src/api/**, src/routes/**, src/core/**, src/admin/**, tests/api/**, tests/admin/** | antigravity-api-agent | replaces scaffold placeholders src/app.ts + src/server.ts; owns the dashboard routes/UI |
+| src/providers/**, tests/providers/**, docs/omp-analysis.md | antigravity-provider-agent | replaces stub src/providers/index.ts; owns account credential lifecycle + OAuth service |
+| src/config/**, src/middleware/**, src/security/**, tests/config/**, tests/security/**, docs/deployment.md, docs/security.md, render.yaml, .env.example | antigravity-deployment-agent | replaces stubs src/config/env.ts + src/middleware/index.ts; owns credential-store backends, session store, CSRF, login limiter |
+| scripts/smoke-account.mjs (v1.1) | coordinator | new e2e script; scripts/** coordinator-owned |
 | docs/handoffs/<agent-id>.md | each agent | your own file only |
 | tests/smoke.test.ts | coordinator | do not modify |
 
@@ -252,3 +253,171 @@ necessary; the coordinator re-runs the full matrix after merge-back.
   fully tested.
 - The Google ToS/account-risk statement must appear in docs touching the live path.
 - No Docker, no paid services, no cloud resources, no publishing/deploying.
+
+---
+
+## 13. Amendment v1.1 — Account Management Dashboard (FROZEN)
+
+Minimal, secure admin dashboard for managing the personal Antigravity account
+connection. No frontend framework and no build step: server-rendered HTML strings
+with plain forms (POST-redirect-GET) plus JSON responses for automation.
+
+### 13.1 Hard rules
+- NEVER expose access tokens, refresh tokens, client secrets, or encryption keys
+  to the browser or to any API client. Status payloads use a whitelist of fields.
+  Tests MUST assert that a sentinel secret never appears in any response
+  body or header.
+- The dashboard is DISABLED (a static "not configured" page for `/admin`) unless
+  an admin password is configured (`ADMIN_PASSWORD` or `ADMIN_PASSWORD_HASH`).
+- Admin auth = password + server-side session cookie. Bearer API keys are NOT
+  valid for `/admin`; the admin session is NOT valid for `/v1/**` or `/usage`.
+- Browser account connect uses only standard Google OAuth 2.0 mechanics
+  (Authorization Code + PKCE) with the operator's own OAuth client. When Google
+  rejects the client/scopes, show the provider error clearly ("browser connect
+  not technically supported for this client") and keep the manual refresh-token
+  path available. Never bypass or evade provider restrictions.
+
+### 13.2 Endpoints (same-origin; `session` = admin cookie; `csrf` = required on state-changing POSTs)
+| Route | Method | Auth | CSRF | Purpose |
+| --- | --- | --- | --- | --- |
+| `/admin` | GET | none | — | login page, or redirect to `/admin/dashboard` when session exists |
+| `/admin/login` | POST (form) | none (rate-limited per IP) | — | verify password, create session (new id + CSRF token), set cookie, redirect |
+| `/admin/logout` | POST | session | ✅ | destroy session, clear cookie, redirect |
+| `/admin/dashboard` | GET | session | — | HTML status page + action forms + flash |
+| `/admin/api/status` | GET | session | — | JSON: account/provider status, credential store health, OAuth config state (no tokens) |
+| `/admin/actions/connect` | POST | session | ✅ | start browser OAuth: create one-time state + PKCE verifier (server-side), 302 to authorize URL (or JSON `{authorizeUrl}` when `Accept: application/json`) |
+| `/admin/oauth/callback` | GET | session + valid one-time state | — | exchange code server-side, store credentials, redirect to dashboard with flash |
+| `/admin/actions/manual-credentials` | POST | session | ✅ | save operator-supplied {refreshToken, clientId?, clientSecret?, projectId?} AFTER validating via test refresh; clear error on failure |
+| `/admin/actions/reconnect` | POST | session | ✅ | force token refresh now; report result |
+| `/admin/actions/disconnect` | POST | session | ✅ | delete stored credentials (store + provider runtime state) |
+
+POSTs answer HTML redirects (form flow) or JSON when `Accept: application/json`.
+Flash messages are one-time (server-side, in-memory).
+
+### 13.3 Account states shown on the dashboard
+- `disconnected` — nothing stored; chat calls return mapped `provider_auth_error`.
+- `connected` — refresh token stored; access token auto-refreshes (60 s skew).
+- `needs_reconnect` — refresh rejected (`invalid_grant`/401); dashboard shows a
+  clear "Reconnect required" banner + last error; chat calls keep failing with a
+  message pointing to the dashboard.
+- Access-token expiry is displayed when known; account change (switch) =
+  `disconnect` then `connect` again — NO redeploy required when the credential
+  store is durable (redis backend).
+
+### 13.4 Browser connect workflow (when technically supported)
+1. `POST /admin/actions/connect` (session + CSRF) → server creates `state` +
+   PKCE `code_verifier` (stored in-memory, TTL 10 min, single-use) and returns the
+   Google authorize URL (PKCE S256, scope list from configuration).
+2. Browser navigates to Google; operator consents.
+3. Google redirects to `GET /admin/oauth/callback?code&state` (redirect URI =
+   `OAUTH_REDIRECT_BASE_URL` + `/admin/oauth/callback`, or derived from the
+   request host when unset).
+4. Server validates `state` (session-bound, single-use), exchanges code server-
+   side, derives `accountHint` (masked email from the id_token payload — no
+   token is forwarded anywhere), stores credentials via the CredentialStore.
+5. Redirect to dashboard with flash "Account connected".
+6. If `code`/`error` from Google: show the exact provider error message; keep
+   the manual path available.
+
+### 13.5 Manual credential path (always available)
+Paste refresh token (+ optional clientId/clientSecret/projectId). The server
+validates by attempting one refresh against the token endpoint; only on success
+is anything stored. Failures produce clear, redacted messages.
+
+### 13.6 Persistence requirements
+- Credential blob is AES-256-GCM encrypted at rest (key from
+  `CREDENTIAL_ENCRYPTION_KEY` via scrypt with a per-record salt); the plaintext
+  refresh token MUST never hit disk or Redis.
+- Backends: `file` (local dev; `CREDENTIAL_FILE_PATH`, best-effort chmod 600) and
+  `redis` (any Redis-compatible URL in `REDIS_URL` — e.g. a free Render Key Value
+  instance; survives restarts/sleeps/redeploys → enables account changes without
+  redeploy). `auto` = redis when `REDIS_URL` is set, else file. The deployment
+  docs must state that `file` on Render Free is ephemeral (credentials lost on
+  restart → reconnect via dashboard) and that `redis` is the durable option.
+- Sessions are in-memory (lost on restart → re-login; acceptable, documented).
+
+## 14. Amendment v1.1 — new environment variables (frozen names)
+
+| Var | Default | Notes |
+| --- | --- | --- |
+| `DASHBOARD_ENABLED` | `auto` | `auto` = enabled iff an admin password is set; `true`/`false` force it |
+| `ADMIN_PASSWORD` | — | plaintext admin password (dev convenience / simple deploys) |
+| `ADMIN_PASSWORD_HASH` | — | preferred: `scrypt$N$r$p$<saltB64>$<hashB64>`; generate with `node scripts/hash-admin-password.mjs` |
+| `ADMIN_SESSION_TTL_MS` | `43200000` | session + cookie TTL (12 h), sliding |
+| `ADMIN_LOGIN_WINDOW_MS` | `300000` | login-attempt rate-limit window |
+| `ADMIN_LOGIN_MAX` | `5` | max login attempts per window per IP, then 429 |
+| `CREDENTIAL_STORE` | `auto` | `auto` \| `file` \| `redis` (auto = redis iff `REDIS_URL` set) |
+| `REDIS_URL` | — | `redis://` or `rediss://`; free Render Key Value instance or any external Redis |
+| `CREDENTIAL_FILE_PATH` | `./.data/credential-store.json` | file backend path (local dev) |
+| `CREDENTIAL_ENCRYPTION_KEY` | — | base64 32 bytes or passphrase; REQUIRED when the dashboard is enabled (fail closed) |
+| `OAUTH_REDIRECT_BASE_URL` | derived from request host | public base URL for the OAuth callback (set on Render, e.g. `https://app.onrender.com`) |
+| `ANTIGRAVITY_OAUTH_SCOPES` | documented default set | space/comma list; default `openid email https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email` (UNVERIFIED — adjust per account) |
+| `ANTIGRAVITY_OAUTH_AUTH_ENDPOINT` | `https://accounts.google.com/o/oauth2/v2/auth` | override (test seam) |
+| `ANTIGRAVITY_OAUTH_TOKEN_ENDPOINT` | `https://oauth2.googleapis.com/token` | override (test seam); replaces the TokenManager hard-coded const when set |
+
+Fail-closed rules (deployment agent implements in zod schema):
+- dashboard enabled (explicit `true`, or `auto` + password present) requires `CREDENTIAL_ENCRYPTION_KEY`.
+- `DASHBOARD_ENABLED=true` requires `ADMIN_PASSWORD` or `ADMIN_PASSWORD_HASH`.
+- `CREDENTIAL_STORE=redis` requires `REDIS_URL`.
+- `AppConfig` gains `admin`, `credentials`, `oauth` sections (src/types/config.ts).
+
+## 15. Amendment v1.1 — new integration seams (frozen signatures)
+
+- `createCredentialStore(config: CredentialStoreConfig, logger?: AppLogger): CredentialStore`
+  — src/security/credential-store.ts (deployment agent). `CredentialStore` interface in
+  src/types/admin.ts. Stub in scaffold: in-memory.
+- `createSessionStore(): SessionStore` — src/security/session-store.ts (deployment agent).
+  In-memory, TTL + sliding refresh, cap 1000, id + csrfToken via crypto randomness.
+- src/security/csrf.ts (deployment agent) exports:
+  `generateCsrfToken(): string`, `verifyCsrfToken(expected: string, provided: string | undefined): boolean` (timing-safe).
+- `createFixedWindowLimiter(opts: { windowMs: number; max: number }): (key: string) => { allowed: boolean; retryAfterSeconds: number; remaining: number; limit: number }`
+  — exported from src/middleware/rate-limit.ts (deployment agent); used by the global
+  hook AND by the admin login gate.
+- `createOAuthService(opts: OAuthServiceOptions): OAuthService` — src/providers/oauth.ts
+  (provider agent). Options: `{ clientId?, clientSecret?, scopes: string[],
+  authEndpoint?, tokenEndpoint?, fetch? }`. Google endpoints, PKCE S256. Stub in
+  scaffold: throws `not_implemented`.
+- `createProviderFromConfig(config: ProviderConfig, deps?: { credentialStore?: CredentialStore }): AIProvider`
+  — additive 2nd param (provider agent). Runtime credential changes via the store must
+  take effect without restart.
+- `AIProvider.getAccountStatus?(): Promise<AntigravityAccountStatus>` — OPTIONAL additive
+  method (types in src/types/admin.ts); implemented by AntigravityProvider; the admin
+  layer falls back to mode-based status when absent (e.g. mock).
+- **Auth hook bypass rule**: the Bearer auth hook skips exactly: `GET /health`,
+  `OPTIONS *`, and ALL `/admin*` paths. `/admin` has its own session auth inside the
+  admin plugin (login page + `POST /admin/login` + `GET /admin/oauth/callback` are the
+  only session-less endpoints and are strictly rate-limited). `/v1/**` and `/usage`
+  keep requiring the Bearer key. `BuildAppOptions` gains optional
+  `admin?: { sessionStore: SessionStore; credentialStore: CredentialStore; oauthService: OAuthService }`
+  — mounted only when provided AND `config.admin.enabled`.
+- Admin routes answer HTML by default and JSON when `Accept: application/json` for
+  `/admin/api/*` GETs (status is JSON-only) and the action POSTs.
+
+## 16. Amendment v1.1 — test minimums and e2e
+
+- provider (>= +10 new): authorize URL shape (endpoint/scope/state/challenge), PKCE
+  S256 verifier/challenge, code exchange with fake fetch (incl. id_token accountHint
+  decode), test-refresh success/failure mapping, credential swap via store without
+  restart, needs_reconnect transitions, token-endpoint env override respected.
+- api (>= +14 new, tests/admin/**): login ok/wrong password/rate-limit 429, session
+  cookie attributes (HttpOnly, SameSite=Lax, Path=/), CSRF 403 on every POST without
+  token, status JSON field whitelist + sentinel-token never in body/headers of ALL
+  admin responses, connect start (configured vs not configured), callback state
+  mismatch/expired rejected, manual-credentials validation failure keeps store
+  untouched, disconnect clears, dashboard disabled mode, redirect-after-POST flows.
+- deployment (>= +12 new): credential-store file roundtrip + ciphertext-at-rest
+  (plaintext sentinel must NOT appear in the file), clear(), redis-lite against a
+  scripted fake RESP TCP server (PING/GET/SET/DEL/AUTH; `redis://` URL parse; error
+  surfacing), session store lifecycle + TTL + regenerate, csrf verify mismatch,
+  limiter window reset, auth bypass matrix (/admin passthrough, /v1 still 401
+  without key, /usage still 401), new env fail-closed cases.
+- coordinator e2e (`scripts/smoke-account.mjs`): boots the built server with a fake
+  Google OAuth server (token endpoint override), runs the COMPLETE account workflow:
+  admin login → status disconnected → connect start → callback with state+code →
+  connected (store updated; plaintext token nowhere) → status shows accountHint →
+  reconnect (fake token endpoint hit again) → disconnect → status disconnected →
+  CSRF 403 → login 429 → Bearer still required on /v1. This is the user-required
+  "complete account-management workflow" test.
+
+Also update §12's no-new-deps rule note: this wave still adds ZERO dependencies
+(node:crypto/net/tls/fetch only).
