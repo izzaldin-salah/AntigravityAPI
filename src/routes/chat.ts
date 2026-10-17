@@ -60,17 +60,23 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (
 
     const abortController = new AbortController();
     const onDisconnect = () => {
-      abortController.abort();
+      // Only treat this as a disconnect while the response is still in flight.
+      // NOTE: req.raw "close" fires when the request body has been fully consumed
+      // (Node >= 16) and must NOT be used as a disconnect signal — aborting there
+      // breaks every normal request. We watch the real abort/transport signals.
+      if (!reply.raw.writableEnded && !abortController.signal.aborted) {
+        abortController.abort();
+      }
     };
 
-    req.raw.on("close", onDisconnect);
+    req.raw.on("aborted", onDisconnect);
     reply.raw.on("close", onDisconnect);
     if (req.raw.socket) {
       req.raw.socket.on("close", onDisconnect);
     }
 
     const cleanupListeners = () => {
-      req.raw.off("close", onDisconnect);
+      req.raw.off("aborted", onDisconnect);
       reply.raw.off("close", onDisconnect);
       if (req.raw.socket) {
         req.raw.socket.off("close", onDisconnect);

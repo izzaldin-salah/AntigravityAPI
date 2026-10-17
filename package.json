@@ -12,6 +12,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "smoke:e2e": "node scripts/smoke-e2e.mjs",
     "dev": "tsx watch src/server.ts",
     "start": "node dist/server.js"
   },
