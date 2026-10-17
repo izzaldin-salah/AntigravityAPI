@@ -1,83 +1,49 @@
 # Handoff — antigravity-api-agent
 
-- Branch: `t3/e7d98298` @ `a05141f`
+- Branch: `t3/7f7f9b33` @ `6e1ddea`
 - Files created/modified:
-  - Modified:
-    - `src/app.ts`
-    - `src/server.ts`
-  - Created:
-    - `src/core/usage-tracker.ts`
-    - `src/core/errors.ts`
-    - `src/core/id.ts`
-    - `src/core/chunk-mapper.ts`
-    - `src/core/index.ts`
-    - `src/api/validation.ts`
-    - `src/api/index.ts`
-    - `src/routes/health.ts`
-    - `src/routes/models.ts`
-    - `src/routes/usage.ts`
-    - `src/routes/chat.ts`
-    - `src/routes/index.ts`
-    - `tests/api/mock-provider.ts`
-    - `tests/api/api.test.ts`
-    - `tests/api/EXAMPLES.md`
-    - `docs/handoffs/antigravity-api-agent.md`
+  - `src/admin/auth.ts` (created): password verification (plaintext SHA-256 + scrypt), session cookie helpers
+  - `src/admin/oauth-state.ts` (created): in-memory single-use PKCE/state manager with 10m TTL
+  - `src/admin/pages.ts` (created): HTML templates (disabled, login, dashboard, error), inline CSS, XSS escaping
+  - `src/admin/routes.ts` (created): 10 endpoints for account management, CSRF validation, rate limiting, flash
+  - `src/admin/index.ts` (created): plugin entry point registering contract §13.2 endpoints
+  - `src/app.ts` (modified): Fastify x-www-form-urlencoded parser, admin plugin mounting and disabled fallback
+  - `src/server.ts` (modified): wiring credential store, session store, OAuth service, provider deps, startup warning
+  - `tests/admin/admin.test.ts` (created): 17 comprehensive tests for admin dashboard, sentinel leak, CSRF, auth
 
 ## Features Implemented
-1. **Core Utilities (`src/core/**`)**:
-   - `UsageTracker`: In-memory usage accounting with total and per-model counts (`requests`, `prompt_tokens`, `completion_tokens`, `total_tokens`) and process start epoch timestamp (`since`).
-   - `OpenAIErrorBody` formatting & `mapProviderErrorToHttp`: Complete mapping of canonical provider error codes (`invalid_request` -> 400, `unauthorized` -> 502 `provider_auth_error`, `not_found` -> 404 `model_not_found`, `rate_limited` -> 429 `rate_limit_exceeded`, `timeout` -> 504 `upstream_timeout`, `aborted` -> 499 `client_closed_request`, `upstream_error` -> 502 `upstream_error`, `not_implemented` -> 501 `not_implemented`, `unknown` -> 500 `internal_error`).
-   - Chat completion ID generation (`chatcmpl-<uuid_no_hyphens>`) using `node:crypto.randomUUID()`.
-   - Streaming SSE chunk transformers: role chunk (`delta: { role: "assistant" }`), content chunk, tool call chunk, finish reason chunk (mapping provider `error` finishReason to `stop`), and usage chunk when requested.
-
-2. **API Validation & Normalization (`src/api/**`)**:
-   - Hand-written strict validation returning OpenAI-standard `{ error: { message, type: "invalid_request_error", param, code } }`.
-   - Normalizes messages (`developer` -> `system` role mapping; string or null content; tool call pass-through).
-   - Validates ranges: `temperature` 0..2, `top_p` 0..1, positive integer `max_tokens` / `max_completion_tokens` (`max_completion_tokens` taking precedence).
-   - `stop` normalization (string | string[] -> string[]).
-   - Tool definitions and tool choice structural validation.
-   - Enforces `n <= 1` (rejecting `n > 1` with 400 and code `unsupported_parameter`).
-   - Ignores unknown fields per contract.
-
-3. **Routes (`src/routes/**`)**:
-   - `GET /health`: Lightweight endpoint returning 200 status, version, uptime, and provider mode with 0 provider calls.
-   - `GET /v1/models`: Returns `{ object: "list", data: models }` from `provider.listModels()`.
-   - `GET /usage`: Merges in-memory `UsageTracker.snapshot()` with `provider.getUsage()`. Degrades provider errors to `provider: null` and never returns 500.
-   - `POST /v1/chat/completions`:
-     - Non-stream: Aggregates provider deltas, tool calls, and usage; returns full OpenAI response; records token usage (estimating `ceil(chars/4)` if omitted by provider).
-     - Stream (SSE): Emits compliant text/event-stream chunks; sends `: keep-alive` heartbeats every 15s; outputs usage chunk before `[DONE]` when `stream_options.include_usage: true`; formats mid-stream errors as `data: {"error":{...}}` followed by `data: [DONE]`.
-     - Client disconnect: Creates an `AbortController`, binds to client socket close, passes `signal` to `NormalizedChatRequest`, and halts stream iteration on abort.
-
-4. **App & Composition Root (`src/app.ts`, `src/server.ts`)**:
-   - `buildApp({ config, provider, usageTracker })`: Configures Fastify with redacted structured logging (`REDACT_LOG_PATHS`), `genReqId: req_<uuid>`, sets `x-request-id` response header, sets error handler enforcing standard OpenAI envelope.
-   - `server.ts`: Composition root connecting `loadConfig` -> `createProviderFromConfig` -> `buildApp` -> `registerSecurityPlugins` -> `listen({ host, port })`.
+- **Account Management Dashboard (`src/admin/**`)**:
+  - `GET /admin`: Static disabled page when disabled; login form or 302 redirect to `/admin/dashboard` when active.
+  - `POST /admin/login`: Fixed-window IP rate limit (`429` + `Retry-After`); constant-time timing-safe password verification (plaintext SHA-256 & `scrypt$N$r$p$<saltB64>$<hashB64>`); session cookie issuance (`HttpOnly`, `SameSite=Lax`, `Path=/`, `Secure` when HTTPS).
+  - `POST /admin/logout`: Requires session + CSRF (`x-csrf-token` header or `csrf_token` body); destroys session, clears cookie (`Max-Age=0`), 302 redirect.
+  - `GET /admin/dashboard`: Server-rendered HTML dashboard with status badge, metadata grid, action forms, flash banner, and unverified OAuth risk notice. No client JS or external assets.
+  - `GET /admin/api/status`: Strict field whitelist (`enabled`, `providerMode`, `provider`, `credentials`, `oauth`). Synthesizes status when provider lacks `getAccountStatus`. Zero tokens exposed.
+  - `POST /admin/actions/connect`: Validates OAuth service config (returns clear 400 listing options if unconfigured); generates 24-byte state + PKCE S256 code verifier/challenge; answers 302 redirect or JSON `{authorizeUrl}`.
+  - `GET /admin/oauth/callback`: Validates and consumes single-use state; handles Google error params; exchanges code server-side and persists credentials to store; flashes status and redirects.
+  - `POST /admin/actions/manual-credentials`: Validates refresh token with `oauthService.testRefresh` before storing; never stores on failure; redacts tokens in error messages; persists on success.
+  - `POST /admin/actions/reconnect`: Re-validates stored credentials via `testRefresh` and reports status without leaking tokens.
+  - `POST /admin/actions/disconnect`: Clears credential store and flashes disconnection confirmation.
+- **Wiring & Integration (`src/app.ts`, `src/server.ts`)**:
+  - Registered core `application/x-www-form-urlencoded` parser using Node `URLSearchParams`.
+  - Wired `createCredentialStore`, `createSessionStore`, `createOAuthService`, and passed admin deps to `buildApp`.
+  - Added Render ephemeral file-storage startup warning in production when `REDIS_URL` is unset.
 
 ## Tests Performed
-- `npm run typecheck`: TypeScript strict typecheck passed with 0 errors.
-- `npm test`: Vitest test runner executed with 19/19 tests passing:
-  - `tests/smoke.test.ts` (1 test): Scaffold baseline health check passes.
-  - `tests/api/api.test.ts` (18 tests):
-    - Health check 200 with 0 provider calls verified.
-    - `x-request-id` header presence and format verified.
-    - Model listing structure verified.
-    - Non-stream completion happy path, role mapping, and usage recording verified.
-    - Tool call accumulation across deltas verified.
-    - Stream SSE chunk sequence (role -> content -> finish_reason -> `[DONE]`) verified.
-    - Stream usage chunk emission with `include_usage: true` verified.
-    - Validation 400s (missing model, empty messages, invalid temperature, n>1 unsupported parameter, top_p & token precedence) verified.
-    - Error code mappings (unauthorized -> 502, not_found -> 404, mid-stream SSE error frame) verified.
-    - Usage accumulation across multiple requests and provider error resilience verified.
-    - Real-socket client disconnect test using port 0, `fetch`, and `AbortController` confirming `signal.aborted` observed within ~200ms verified.
-- `npm run build`: Clean CommonJS compilation to `dist/`.
+- `npm run typecheck`: Passed with 0 errors (`tsc -p tsconfig.json --noEmit`).
+- `npm run build`: Passed cleanly (`tsc -p tsconfig.build.json` -> `dist/`).
+- `npm test`: 13 test files passed, 88/88 tests passed:
+  - 17 new tests in `tests/admin/admin.test.ts`: disabled page (200/404), login success & cookie attributes, scrypt hash login, invalid password (401), rate-limit gate (429 + Retry-After), CSRF validation (403 on missing/wrong tokens across all POSTs), SENTINEL leak prevention (asserts `SENTINEL_TOKEN_DO_NOT_LEAK` never appears in bodies/headers), status JSON whitelist & synthesis, connect flow (unconfigured vs configured), callback (state validation, single-use consume, Google errors, code exchange), manual credentials (failure does not touch store, success updates store), reconnect, disconnect, logout, and form-flow POST-redirect-GET with flash consume-once.
+  - All 71 existing test cases in `tests/api/**`, `tests/security/**`, `tests/providers/**`, `tests/config/**`, and `tests/smoke.test.ts` remain green.
 
 ## Known Limitations
-- Usage tracking is in-memory only (suitable for single-container deployment; resets across restarts).
-- Security hooks (API-key auth, CORS, rate limiting) are registered via `registerSecurityPlugins` in `src/middleware/index.ts` (owned by deployment agent).
+- Session store and pending OAuth state map are in-memory (sessions invalidate across server restarts).
+- Provider credential re-reads rely on provider agent implementing lazy refresh via the store on next chat request.
 
 ## Integration Requirements
-- Frozen signatures respected: `buildApp({ config, provider, usageTracker })` provides an optional default for `usageTracker` to preserve backward compatibility with `smoke.test.ts`.
-- No new npm packages or package.json changes required.
+- Zero new dependencies added (uses Node built-ins: `crypto`, `URLSearchParams`).
+- Provider agent's `createProviderFromConfig` signature accepts optional `deps: { credentialStore, tokenEndpoint }`.
+- Deployment agent's auth hook bypasses `/admin*` routes per architecture contract §15.
 
 ## Verified vs Unverified
-- **Verified**: Fastify app setup, OpenAI request validation & normalization, SSE and non-streaming responses, tool calls, error handling, usage tracking, client disconnect cancellation, and test suite with offline mock provider.
-- **Unverified**: Live Google Antigravity OAuth upstream communication (Antigravity OAuth is unofficial and experimental; live path relies on provider agent implementation and credentials).
+- **Verified**: Fastify admin dashboard, password/scrypt auth, CSRF, IP rate-limiting, cookie lifecycle, OAuth state/PKCE lifecycle, sentinel secrecy, error redaction, and in-memory credential persistence workflows under automated mock testing.
+- **UNVERIFIED / EXPERIMENTAL**: Live Google OAuth and Antigravity provider integration. Antigravity OAuth through third-party applications is unofficial and may violate Google's Terms of Service; account suspension is possible.
