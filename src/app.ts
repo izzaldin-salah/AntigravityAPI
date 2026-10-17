@@ -1,15 +1,28 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
+import { registerAdminDashboard, renderDisabledPage } from "./admin";
 import { OpenAIHttpError, formatOpenAIError } from "./core/errors";
 import { UsageTracker } from "./core/usage-tracker";
 import { registerRoutes } from "./routes";
+import type {
+  CredentialStore,
+  OAuthService,
+  SessionStore,
+} from "./types/admin";
 import { REDACT_LOG_PATHS, type AppConfig } from "./types/config";
 import type { AIProvider } from "./types/provider";
+
+export interface BuildAppAdminOptions {
+  sessionStore: SessionStore;
+  credentialStore: CredentialStore;
+  oauthService: OAuthService;
+}
 
 export interface BuildAppOptions {
   config: AppConfig;
   provider: AIProvider;
   usageTracker?: UsageTracker;
+  admin?: BuildAppAdminOptions;
 }
 
 export async function buildApp(
@@ -21,7 +34,26 @@ export async function buildApp(
       redact: REDACT_LOG_PATHS,
     },
     genReqId: () => `req_${randomUUID()}`,
+    trustProxy: options.config.trustProxy,
   });
+
+  // Register content-type parser for application/x-www-form-urlencoded using standard URLSearchParams
+  app.addContentTypeParser(
+    "application/x-www-form-urlencoded",
+    { parseAs: "string" },
+    (_req, body: string, done) => {
+      try {
+        const params = new URLSearchParams(body);
+        const parsed: Record<string, string> = {};
+        for (const [key, value] of params.entries()) {
+          parsed[key] = value;
+        }
+        done(null, parsed);
+      } catch (err) {
+        done(err as Error, undefined);
+      }
+    },
+  );
 
   // Set x-request-id response header to correlation id
   app.addHook("onSend", async (request, reply) => {
@@ -72,6 +104,21 @@ export async function buildApp(
     provider: options.provider,
     usageTracker,
   });
+
+  if (options.admin && options.config.admin.enabled) {
+    await registerAdminDashboard(app, {
+      config: options.config,
+      provider: options.provider,
+      sessionStore: options.admin.sessionStore,
+      credentialStore: options.admin.credentialStore,
+      oauthService: options.admin.oauthService,
+    });
+  } else {
+    app.get("/admin", async (_request, reply) => {
+      reply.header("Content-Type", "text/html; charset=utf-8");
+      return reply.send(renderDisabledPage());
+    });
+  }
 
   return app;
 }
