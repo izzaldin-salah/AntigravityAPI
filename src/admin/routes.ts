@@ -362,6 +362,82 @@ export function createAdminRoutes(
     return reply.redirect(authorizeUrl);
   });
 
+
+  // Copy-URL login for a registered localhost callback (the browser need not host a server).
+  // This does not grant access to upstream services; it still requires an authorized OAuth client.
+  app.post("/admin/actions/connect-local", async (request, reply) => {
+    const session = await resolveSession(request);
+    if (!session) return reply.redirect("/admin");
+    if (!checkCsrf(request, session)) {
+      return reply.status(403).send(renderErrorPage("Forbidden", "Invalid or missing CSRF token."));
+    }
+    if (!oauthService.isConfigured()) {
+      return reply.status(400).send(renderErrorPage("OAuth Not Configured", "OAuth client credentials are missing."));
+    }
+    const redirectUri = "http://127.0.0.1:51121/oauth-callback";
+    const { state, codeChallenge } = oauthStateManager.create(session.id, redirectUri);
+    const authorizeUrl = oauthService.buildAuthorizeUrl({ state, codeChallenge, redirectUri });
+    // Let the original dashboard tab remain open for pasting the returned URL.
+    reply.header("Cache-Control", "no-store");
+    reply.header("Content-Type", "text/html; charset=utf-8");
+    return reply.send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Continue Google sign-in</title></head><body style="font-family:system-ui;max-width:680px;margin:4rem auto;padding:1rem"><h1>Google sign-in</h1><p>Open the Google authorization page, complete sign-in, then copy the entire localhost callback URL from the address bar. The browser may say it cannot connect to localhost; that is expected.</p><p><a href="${authorizeUrl.replaceAll("&", "&amp;").replaceAll('"', '&quot;')}" target="_blank" rel="noopener noreferrer">Open Google sign-in</a></p><p><a href="/admin/dashboard">Return to dashboard to paste the callback URL</a></p></body></html>`);
+  });
+
+  app.post("/admin/actions/complete-local", async (request, reply) => {
+    const session = await resolveSession(request);
+    if (!session) return reply.redirect("/admin");
+    if (!checkCsrf(request, session)) {
+      return reply.status(403).send(renderErrorPage("Forbidden", "Invalid or missing CSRF token."));
+    }
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const pasted = typeof body.callbackUrl === "string" ? body.callbackUrl.trim() : "";
+    if (!pasted || pasted.length > 8192) {
+      return reply.status(400).send(renderErrorPage("Invalid URL", "Paste the full localhost callback URL (maximum 8192 characters)."));
+    }
+    let callback: URL;
+    try {
+      callback = new URL(pasted);
+    } catch {
+      return reply.status(400).send(renderErrorPage("Invalid URL", "The pasted value is not a valid URL."));
+    }
+    const expected = "http://127.0.0.1:51121/oauth-callback";
+    if (`${callback.origin}${callback.pathname}` !== expected || callback.username || callback.password || callback.hash) {
+      return reply.status(400).send(renderErrorPage("Invalid URL", "Only the expected localhost OAuth callback URL is accepted."));
+    }
+    if (callback.searchParams.getAll("state").length !== 1 || callback.searchParams.getAll("code").length !== 1) {
+      return reply.status(400).send(renderErrorPage("Invalid Callback", "The callback must contain exactly one state and one code."));
+    }
+    const state = callback.searchParams.get("state") ?? "";
+    const code = callback.searchParams.get("code") ?? "";
+    if (!state || !code) {
+      return reply.status(400).send(renderErrorPage("Invalid Callback", "OAuth state or authorization code is missing."));
+    }
+    const pending = oauthStateManager.consume(state, session.id);
+    if (!pending || pending.redirectUri !== expected) {
+      return reply.status(400).send(renderErrorPage("Invalid State", "The sign-in request has expired, was already used, or belongs to another session. Start again."));
+    }
+    try {
+      const result = await oauthService.exchangeCode({ code, codeVerifier: pending.codeVerifier, redirectUri: expected });
+      const clientId = config.provider.mode === "antigravity" ? config.provider.credentials.clientId : undefined;
+      const clientSecret = config.provider.mode === "antigravity" ? config.provider.credentials.clientSecret : undefined;
+      await credentialStore.save({
+        refreshToken: result.refreshToken,
+        clientId,
+        clientSecret,
+        projectId: result.projectId,
+        accountHint: result.accountHint,
+        updatedAt: Date.now(),
+      });
+      // Provider token state is read from the credential store by the adapter.
+      setFlash(session.id, "success", "Account connected using localhost callback");
+      return reply.redirect("/admin/dashboard");
+    } catch {
+      // Do not echo upstream errors, pasted URLs, or authorization codes into HTML or logs.
+      setFlash(session.id, "error", "OAuth code exchange failed. Start a fresh sign-in and try again.");
+      return reply.redirect("/admin/dashboard");
+    }
+  });
+
   // 7. GET /admin/oauth/callback — Exchange OAuth code & persist
   app.get("/admin/oauth/callback", async (request, reply) => {
     const session = await resolveSession(request);
@@ -460,7 +536,7 @@ export function createAdminRoutes(
         );
     }
 
-    const redirectUri = getRedirectUri(request);
+    const redirectUri = consumed.redirectUri ?? getRedirectUri(request);
 
     try {
       const result = await oauthService.exchangeCode({

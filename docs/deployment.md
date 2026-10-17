@@ -88,7 +88,8 @@ If you want to use the browser-based OAuth connect flow (`/admin/actions/connect
    ```env
    OAUTH_REDIRECT_BASE_URL=https://<your-render-subdomain>.onrender.com
    ```
-4. If your Google OAuth client does not permit external apps or throws policy errors, you can always use the **Manual Credential** form on the dashboard to supply your refresh token directly.
+4. **OAuth client registered with a localhost callback only** (community clients typically expect `http://127.0.0.1:51121/oauth-callback`): use the dashboard's **Copy localhost callback URL** card. Start sign-in, complete consent in Google (the browser then fails to load the localhost page — expected), copy the entire callback URL from the address bar, and paste it into the dashboard to finish the exchange server-side. The Render callback URL from step 2 is not needed on this path.
+5. If your Google OAuth client does not permit external apps or throws policy errors, you can always use the **Manual Credential** form on the dashboard to supply your refresh token directly.
 
 ---
 

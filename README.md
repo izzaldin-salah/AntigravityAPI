@@ -100,6 +100,12 @@ Open `http://localhost:3000/admin`, log in, and you can:
   Google OAuth client is configured (`ANTIGRAVITY_CLIENT_ID`, optional secret) —
   if Google rejects the client or scopes, the exact error is shown and the
   manual path stays available;
+- **copy-URL localhost sign-in** — for OAuth clients registered with a
+  localhost redirect only (e.g. on Render, where an `onrender.com` callback
+  cannot be registered): start sign-in, complete it in Google (the browser then
+  fails to load the localhost page — expected), and paste the entire
+  `http://127.0.0.1:51121/oauth-callback?...` URL from the address bar back into
+  the dashboard to finish the exchange server-side;
 - **paste a refresh token** manually — validated with a live token refresh
   before anything is stored, so a bad token never replaces a good one;
 - reconnect, switch accounts (disconnect → connect), and log out.

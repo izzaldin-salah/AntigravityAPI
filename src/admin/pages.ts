@@ -315,6 +315,24 @@ export function renderDashboardPage(data: DashboardPageData): string {
       ${connectSection}
     </div>
 
+
+    <div class="card">
+      <h2>Copy localhost callback URL</h2>
+      <p>Alternative sign-in flow for OAuth clients that authorize the localhost callback. Start sign-in, finish it in the new Google tab, then copy the entire address-bar URL back here. An unreachable localhost page is expected.</p>
+      <form action="/admin/actions/connect-local" method="POST" target="_blank" style="margin-bottom:12px;">
+        <input type="hidden" name="csrf_token" value="${escapeHtml(data.csrfToken)}" />
+        <button type="submit" class="btn" ${data.oauthConfigured ? "" : "disabled"}>Start localhost sign-in</button>
+      </form>
+      <form action="/admin/actions/complete-local" method="POST">
+        <input type="hidden" name="csrf_token" value="${escapeHtml(data.csrfToken)}" />
+        <div class="form-group">
+          <label for="callbackUrl">Full localhost callback URL</label>
+          <input type="text" id="callbackUrl" name="callbackUrl" required autocomplete="off" spellcheck="false" placeholder="http://127.0.0.1:51121/oauth-callback?code=...&amp;state=..." />
+        </div>
+        <button type="submit" class="btn">Complete localhost sign-in</button>
+      </form>
+    </div>
+
     <div class="card">
       <h2>Manual Credentials</h2>
       <p style="color: #cbd5e1; font-size: 0.95rem;">Paste an existing refresh token. Credentials are encrypted at rest and validated before saving.</p>

@@ -4,6 +4,7 @@ export interface PendingOAuthState {
   sessionId: string;
   codeVerifier: string;
   createdAt: number;
+  redirectUri?: string;
 }
 
 export class OAuthStateManager {
@@ -14,7 +15,7 @@ export class OAuthStateManager {
     this.ttlMs = ttlMs;
   }
 
-  create(sessionId: string): {
+  create(sessionId: string, redirectUri?: string): {
     state: string;
     codeVerifier: string;
     codeChallenge: string;
@@ -31,6 +32,7 @@ export class OAuthStateManager {
       sessionId,
       codeVerifier,
       createdAt: now,
+      redirectUri,
     });
 
     return { state, codeVerifier, codeChallenge };
@@ -39,7 +41,7 @@ export class OAuthStateManager {
   consume(
     state: string,
     sessionId: string,
-  ): { codeVerifier: string } | null {
+  ): { codeVerifier: string; redirectUri?: string } | null {
     this.prune();
     const entry = this.states.get(state);
     if (!entry) {
@@ -57,7 +59,7 @@ export class OAuthStateManager {
       return null;
     }
 
-    return { codeVerifier: entry.codeVerifier };
+    return { codeVerifier: entry.codeVerifier, redirectUri: entry.redirectUri };
   }
 
   private prune(): void {

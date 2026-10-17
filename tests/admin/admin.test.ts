@@ -1036,4 +1036,219 @@ describe("Admin Dashboard & Routes", () => {
     expect(dashSecondRes.statusCode).toBe(200);
     expect(dashSecondRes.body).not.toContain("Credentials saved");
   });
+
+  it("localhost callback flow: rejects bad pasted URLs, isolates state, and completes valid sign-in", async () => {
+    const config = createTestConfig();
+    const sessionStore = createSessionStore();
+    const credentialStore = createCredentialStore(config.credentials);
+    const oauthService = new FakeOAuthService();
+
+    const app = await buildApp({
+      config,
+      provider: new MockProvider(),
+      admin: { sessionStore, credentialStore, oauthService },
+    });
+
+    const session = await sessionStore.create(config.admin.sessionTtlMs);
+    const cookieHeader = `admin_session=${session.id}`;
+    const expectedRedirect = "http://127.0.0.1:51121/oauth-callback";
+
+    // 1. connect-local without CSRF -> 403
+    const resNoCsrf = await app.inject({
+      method: "POST",
+      url: "/admin/actions/connect-local",
+      headers: { cookie: cookieHeader },
+    });
+    expect(resNoCsrf.statusCode).toBe(403);
+
+    // 2. connect-local not configured -> 400
+    oauthService.configured = false;
+    const resNotConfigured = await app.inject({
+      method: "POST",
+      url: "/admin/actions/connect-local",
+      headers: { cookie: cookieHeader, "x-csrf-token": session.csrfToken },
+    });
+    expect(resNotConfigured.statusCode).toBe(400);
+
+    // 3. connect-local configured -> HTML page with authorize URL using the localhost redirect
+    oauthService.configured = true;
+    const startFlow = async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/admin/actions/connect-local",
+        headers: { cookie: cookieHeader, "x-csrf-token": session.csrfToken },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.headers["content-type"]).toContain("text/html");
+      expect(res.body).toContain(encodeURIComponent(expectedRedirect));
+      const match = /state=([A-Za-z0-9_-]+)/.exec(res.body);
+      expect(match).not.toBeNull();
+      return match![1];
+    };
+    const state1 = await startFlow();
+
+    // 4. a state created for session A cannot be completed from session B
+    const otherSession = await sessionStore.create(config.admin.sessionTtlMs);
+    const resCrossSession = await app.inject({
+      method: "POST",
+      url: "/admin/actions/complete-local",
+      headers: {
+        cookie: `admin_session=${otherSession.id}`,
+        "x-csrf-token": otherSession.csrfToken,
+        accept: "application/json",
+      },
+      payload: {
+        callbackUrl: `${expectedRedirect}?code=x&state=${state1}`,
+      },
+    });
+    expect(resCrossSession.statusCode).toBe(400);
+
+    const state2 = await startFlow();
+
+    // 5. invalid or non-matching pasted URLs are rejected (and do not consume the state)
+    const badUrls = [
+      "not-a-url",
+      `http://evil.example/oauth-callback?code=x&state=${state2}`,
+      "http://127.0.0.1:51121/other-path?code=x&state=y",
+      "http://user:pass@127.0.0.1:51121/oauth-callback?code=x&state=y",
+      "http://127.0.0.1:51121/oauth-callback?code=x&state=y#fragment",
+      `http://127.0.0.1:51121/oauth-callback?code=a&code=b&state=${state2}`,
+      `http://127.0.0.1:51121/oauth-callback?state=${state2}`,
+      "http://127.0.0.1:51121/oauth-callback?code=x&state=unknown-state",
+    ];
+    for (const callbackUrl of badUrls) {
+      const res = await app.inject({
+        method: "POST",
+        url: "/admin/actions/complete-local",
+        headers: {
+          cookie: cookieHeader,
+          "x-csrf-token": session.csrfToken,
+          accept: "application/json",
+        },
+        payload: { callbackUrl },
+      });
+      expect(res.statusCode, `Expected 400 for ${callbackUrl}`).toBe(400);
+    }
+
+    // 6. a state from the normal (non-localhost) connect flow cannot be completed here
+    const normalConnect = await app.inject({
+      method: "POST",
+      url: "/admin/actions/connect",
+      headers: {
+        cookie: cookieHeader,
+        "x-csrf-token": session.csrfToken,
+        accept: "application/json",
+      },
+    });
+    const normalState = new URL(
+      normalConnect.json().authorizeUrl,
+    ).searchParams.get("state")!;
+    const resCrossFlow = await app.inject({
+      method: "POST",
+      url: "/admin/actions/complete-local",
+      headers: {
+        cookie: cookieHeader,
+        "x-csrf-token": session.csrfToken,
+        accept: "application/json",
+      },
+      payload: {
+        callbackUrl: `${expectedRedirect}?code=x&state=${normalState}`,
+      },
+    });
+    expect(resCrossFlow.statusCode).toBe(400);
+
+    // 7. happy path: paste the full localhost callback URL via the browser form (form-encoded)
+    const callbackUrl = `${expectedRedirect}?code=google-code-local&state=${state2}`;
+    const resComplete = await app.inject({
+      method: "POST",
+      url: "/admin/actions/complete-local",
+      headers: {
+        cookie: cookieHeader,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      payload: `csrf_token=${session.csrfToken}&callbackUrl=${encodeURIComponent(callbackUrl)}`,
+    });
+    expect(resComplete.statusCode).toBe(302);
+    expect(resComplete.headers.location).toBe("/admin/dashboard");
+
+    // Code exchange must use the localhost redirect URI; credentials persisted
+    expect(oauthService.lastExchangeCodeInput?.redirectUri).toBe(
+      expectedRedirect,
+    );
+    expect(oauthService.lastExchangeCodeInput?.code).toBe("google-code-local");
+    const saved = await credentialStore.load();
+    expect(saved).not.toBeNull();
+    expect(saved?.refreshToken).toBe("fake-refresh-token");
+    expect(saved?.accountHint).toBe("user@example.com");
+
+    // 8. single-use: the same state cannot be completed twice
+    const resReuse = await app.inject({
+      method: "POST",
+      url: "/admin/actions/complete-local",
+      headers: {
+        cookie: cookieHeader,
+        "x-csrf-token": session.csrfToken,
+        accept: "application/json",
+      },
+      payload: { callbackUrl },
+    });
+    expect(resReuse.statusCode).toBe(400);
+
+    // 9. dashboard flash reflects the localhost connection
+    const dashRes = await app.inject({
+      method: "GET",
+      url: "/admin/dashboard",
+      headers: { cookie: cookieHeader },
+    });
+    expect(dashRes.body).toContain("Account connected using localhost callback");
+  });
+
+  it("localhost callback flow: exchange failure flashes an error without saving credentials or echoing the code", async () => {
+    const config = createTestConfig();
+    const sessionStore = createSessionStore();
+    const credentialStore = createCredentialStore(config.credentials);
+    const oauthService = new FakeOAuthService();
+
+    const app = await buildApp({
+      config,
+      provider: new MockProvider(),
+      admin: { sessionStore, credentialStore, oauthService },
+    });
+
+    const session = await sessionStore.create(config.admin.sessionTtlMs);
+    const cookieHeader = `admin_session=${session.id}`;
+
+    const startRes = await app.inject({
+      method: "POST",
+      url: "/admin/actions/connect-local",
+      headers: { cookie: cookieHeader, "x-csrf-token": session.csrfToken },
+    });
+    const state = /state=([A-Za-z0-9_-]+)/.exec(startRes.body)![1];
+
+    oauthService.failExchange = true;
+    const resComplete = await app.inject({
+      method: "POST",
+      url: "/admin/actions/complete-local",
+      headers: {
+        cookie: cookieHeader,
+        "x-csrf-token": session.csrfToken,
+        accept: "application/json",
+      },
+      payload: {
+        callbackUrl: `http://127.0.0.1:51121/oauth-callback?code=SENTINEL_CODE&state=${state}`,
+      },
+    });
+    expect(resComplete.statusCode).toBe(302);
+    expect(resComplete.headers.location).toBe("/admin/dashboard");
+    expect(await credentialStore.load()).toBeNull();
+
+    const dashRes = await app.inject({
+      method: "GET",
+      url: "/admin/dashboard",
+      headers: { cookie: cookieHeader },
+    });
+    expect(dashRes.body).toContain("OAuth code exchange failed");
+    expect(dashRes.body).not.toContain("SENTINEL_CODE");
+    expect(dashRes.body).not.toContain("Google rejected code exchange");
+  });
 });
