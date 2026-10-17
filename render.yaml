@@ -1,0 +1,36 @@
+# Render Blueprint Specification
+# Service: personal-antigravity-api
+# Runtime: Native Node.js (Render Free Web Service — NO Docker)
+services:
+  - type: web
+    name: personal-antigravity-api
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PROVIDER_MODE
+        value: mock
+      - key: TRUST_PROXY
+        value: "true"
+      - key: LOG_LEVEL
+        value: info
+      # Secrets and sensitive variables configured directly in Render Dashboard (never committed)
+      - key: API_KEYS
+        sync: false
+      - key: ANTIGRAVITY_REFRESH_TOKEN
+        sync: false
+      - key: ANTIGRAVITY_CLIENT_ID
+        sync: false
+      - key: ANTIGRAVITY_CLIENT_SECRET
+        sync: false
+      - key: ANTIGRAVITY_ACCESS_TOKEN
+        sync: false
+      - key: ANTIGRAVITY_PROJECT_ID
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
