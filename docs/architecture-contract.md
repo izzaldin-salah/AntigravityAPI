@@ -144,7 +144,9 @@ Endpoints:
 Request validation (POST /v1/chat/completions):
 - `model`: required non-empty string.
 - `messages`: required non-empty array; roles system|user|assistant|tool|developer
-  (developer -> system); content string|null; `tool_calls` / `tool_call_id` accepted.
+  (developer -> system); content string | array of content parts | null; text
+  parts in an array are flattened to a string, image/audio parts are rejected
+  (the upstream is text-only); `tool_calls` / `tool_call_id` accepted.
 - `stream`: boolean, default false.
 - `temperature` 0..2; `top_p` 0..1; `max_tokens`/`max_completion_tokens` positive
   int (`max_completion_tokens` wins if both); `stop` string|string[] normalized to

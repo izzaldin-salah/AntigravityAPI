@@ -11,6 +11,53 @@ export interface ValidatedChatRequest {
   streamOptions?: { include_usage?: boolean };
 }
 
+/**
+ * Flatten OpenAI-style content parts into plain text.
+ *
+ * Clients such as 5ire and Cline send `content` as an array of parts
+ * (`[{type:"text",text:"..."}]`) instead of a bare string. The Antigravity
+ * upstream is text-only, so text parts are concatenated and image/audio
+ * parts are rejected with a clear error instead of being silently dropped.
+ */
+function flattenContentParts(parts: unknown[], index: number): string {
+  const texts: string[] = [];
+  for (const part of parts) {
+    if (typeof part === "string") {
+      texts.push(part);
+      continue;
+    }
+    if (!part || typeof part !== "object" || Array.isArray(part)) {
+      throw new OpenAIHttpError(
+        400,
+        `Message content at index ${index} contains an invalid content part.`,
+        "invalid_request_error",
+        "messages",
+      );
+    }
+    const typed = part as { type?: unknown; text?: unknown };
+    const type = typeof typed.type === "string" ? typed.type : "";
+    if ((type === "text" || type === "input_text") && typeof typed.text === "string") {
+      texts.push(typed.text);
+      continue;
+    }
+    if (type === "image_url" || type === "input_audio" || type === "audio") {
+      throw new OpenAIHttpError(
+        400,
+        `Message content at index ${index} contains a '${type}' part. This gateway forwards text only — image and audio input are not supported.`,
+        "invalid_request_error",
+        "messages",
+      );
+    }
+    throw new OpenAIHttpError(
+      400,
+      `Message content at index ${index} contains an unsupported content part type '${type}'.`,
+      "invalid_request_error",
+      "messages",
+    );
+  }
+  return texts.join("");
+}
+
 export function validateAndNormalizeChatRequest(
   body: unknown,
   requestId: string,
@@ -84,15 +131,18 @@ export function validateAndNormalizeChatRequest(
 
     let content: string | null = null;
     if (m.content !== undefined && m.content !== null) {
-      if (typeof m.content !== "string") {
+      if (typeof m.content === "string") {
+        content = m.content;
+      } else if (Array.isArray(m.content)) {
+        content = flattenContentParts(m.content, i);
+      } else {
         throw new OpenAIHttpError(
           400,
-          `Message content at index ${i} must be a string or null.`,
+          `Message content at index ${i} must be a string, an array of content parts, or null.`,
           "invalid_request_error",
           "messages",
         );
       }
-      content = m.content;
     }
 
     const chatMsg: ChatMessage = {

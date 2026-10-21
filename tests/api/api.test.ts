@@ -175,6 +175,69 @@ describe("personal-antigravity-api API endpoints", () => {
     await app.close();
   });
 
+  it("POST /v1/chat/completions accepts array content parts and flattens them to text", async () => {
+    // 5ire and other clients send `content` as an array of parts.
+    let seenContent: unknown;
+    const provider = new MockTestProvider({
+      chatHandler: async function* (req) {
+        seenContent = req.messages[0]?.content;
+        yield { type: "start", id: "chat-array-content", model: "model", created: 1000 };
+        yield { type: "delta", text: "ok" };
+        yield { type: "done", finishReason: "stop" };
+      },
+    });
+
+    const app = await buildApp({ config: testConfig, provider });
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: {
+        model: "model",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "weather " },
+              { type: "text", text: "in paris?" },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(seenContent).toBe("weather in paris?");
+
+    await app.close();
+  });
+
+  it("POST /v1/chat/completions rejects image content parts with a clear error", async () => {
+    const provider = new MockTestProvider();
+    const app = await buildApp({ config: testConfig, provider });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: {
+        model: "model",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "what is this?" },
+              { type: "image_url", image_url: { url: "https://example.com/a.png" } },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.message).toContain("text only");
+
+    await app.close();
+  });
+
   it("POST /v1/chat/completions (streaming) yields correct SSE chunk sequence", async () => {
     const provider = new MockTestProvider({
       chatHandler: async function* (req) {
