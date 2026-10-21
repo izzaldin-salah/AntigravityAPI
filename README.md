@@ -184,11 +184,12 @@ agents work:
   (for example *"Cannot fetch content from the provided URL"*) instead of a
   bare status code, so a rejected image tells you what was wrong.
 
-> The upstream requires the conversation to **end with a user turn**. If your
-> client sends the assistant's last message (a history echo or a prefill), the
-> gateway appends a whitespace-only user turn so the request is accepted
-> instead of failing with *"Requests ending with a model turn are not
-> supported"*.
+> The upstream requires the conversation to **end with a user turn**, and it
+> ignores turns that carry no content. The gateway compensates: a trailing
+> assistant message gets a whitespace-only user turn, an empty user message
+> gets a whitespace part, and an empty assistant message is dropped — so a
+> request like *"…assistant, user (empty)"* is accepted instead of failing with
+> *"Requests ending with a model turn are not supported"*.
 
 ### Structured output (`response_format`)
 

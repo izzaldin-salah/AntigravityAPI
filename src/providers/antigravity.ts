@@ -563,6 +563,18 @@ export class AntigravityProvider implements AIProvider {
         }
         parts.push(part);
       }
+
+      if (parts.length === 0) {
+        // The upstream IGNORES a turn without parts, so an empty final user
+        // message disappears and the previous model turn becomes the
+        // effective last turn -> "Requests ending with a model turn are not
+        // supported". A user turn therefore gets a whitespace part (the
+        // upstream counts it as a user turn); an empty model turn carries no
+        // information and is dropped.
+        if (role === "model") continue;
+        parts.push({ text: " " });
+      }
+
       contents.push({ role, parts });
     }
 
@@ -580,11 +592,17 @@ export class AntigravityProvider implements AIProvider {
       contents.push({ role: "user", parts: [{ text: " " }] });
     }
 
+    // An empty system message would add an empty text part, which the
+    // upstream ignores the same way it ignores empty turns.
+    const systemParts = systemMessages
+      .map((message) => (message.content ?? "").trim())
+      .filter((text) => text.length > 0)
+      .map((text) => ({ text }));
     const systemInstruction =
-      systemMessages.length > 0
+      systemParts.length > 0
         ? {
             role: "user",
-            parts: systemMessages.map((m) => ({ text: m.content ?? "" })),
+            parts: systemParts,
           }
         : undefined;
 

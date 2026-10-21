@@ -222,6 +222,11 @@ Vision and structured output (Antigravity provider; live-verified 2026-10-22):
 
 Backend request-shape constraints (live-verified 2026-10-22) and how the
 gateway absorbs them:
+- the upstream **ignores a turn without parts** — an empty final user message
+  therefore disappears, the previous model turn becomes the effective last
+  turn, and the request is rejected with "Requests ending with a model turn
+  are not supported". The provider gives an empty user turn a whitespace part
+  (the upstream counts it) and drops an empty model turn;
 - the upstream rejects a conversation that **ends with a model turn**
   ("Requests ending with a model turn are not supported") — the provider
   appends a whitespace-only user turn in that case;

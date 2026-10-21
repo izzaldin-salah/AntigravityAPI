@@ -896,6 +896,82 @@ describe("AntigravityProvider", () => {
       expect(contents[2]).toEqual({ role: "user", parts: [{ text: " " }] });
     });
 
+    it("gives an empty final user turn a whitespace part", async () => {
+      // The upstream ignores a turn without parts, so an empty final user
+      // message would make the previous model turn the effective last turn.
+      const { provider, readBody } = createCapturingProvider(sse);
+
+      const request: NormalizedChatRequest = {
+        model: "gemini-3.8-flash-high",
+        messages: [
+          { role: "user", content: "Hi" },
+          { role: "assistant", content: "Hello!" },
+          { role: "user", content: "" },
+        ],
+        stream: true,
+        requestId: "empty-final-user-turn",
+      };
+
+      for await (const _ of provider.chat(request)) {
+        // drain
+      }
+
+      const contents = readBody().request?.contents ?? [];
+      expect(contents).toHaveLength(3);
+      expect(contents[2]).toEqual({ role: "user", parts: [{ text: " " }] });
+    });
+
+    it("drops an empty assistant turn", async () => {
+      const { provider, readBody } = createCapturingProvider(sse);
+
+      const request: NormalizedChatRequest = {
+        model: "gemini-3.8-flash-high",
+        messages: [
+          { role: "user", content: "Hi" },
+          { role: "assistant", content: "" },
+          { role: "user", content: "Still there?" },
+        ],
+        stream: true,
+        requestId: "empty-assistant-turn",
+      };
+
+      for await (const _ of provider.chat(request)) {
+        // drain
+      }
+
+      const contents = readBody().request?.contents ?? [];
+      expect(contents).toHaveLength(2);
+      expect(contents[0]).toEqual({ role: "user", parts: [{ text: "Hi" }] });
+      expect(contents[1]).toEqual({
+        role: "user",
+        parts: [{ text: "Still there?" }],
+      });
+    });
+
+    it("omits empty system messages from the system instruction", async () => {
+      const { provider, readBody } = createCapturingProvider(sse);
+
+      const request: NormalizedChatRequest = {
+        model: "gemini-3.8-flash-high",
+        messages: [
+          { role: "system", content: "  " },
+          { role: "system", content: "Be terse." },
+          { role: "user", content: "Hi" },
+        ],
+        stream: true,
+        requestId: "empty-system-message",
+      };
+
+      for await (const _ of provider.chat(request)) {
+        // drain
+      }
+
+      const body = readBody().request as unknown as {
+        systemInstruction?: { parts?: Array<{ text: string }> };
+      };
+      expect(body.systemInstruction?.parts).toEqual([{ text: "Be terse." }]);
+    });
+
     it("reports the request roles when the upstream complains about a model turn", async () => {
       const fakeFetch = vi.fn(async () =>
         new Response(

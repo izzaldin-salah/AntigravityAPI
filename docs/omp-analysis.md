@@ -320,3 +320,33 @@ Gateway behaviour added in response:
   request leaves the gateway, because the upstream (which does the fetching)
   cannot reach them either;
 - empty image payloads are rejected before the request leaves the gateway.
+
+### 14.1 The real cause of "Requests ending with a model turn are not supported"
+
+A failing client reported this error with the request role sequence
+`user > assistant > user > assistant > … > user` — the conversation **ended
+with a user turn**, so the obvious reading ("the client sent the assistant's
+last message") was wrong. Probing the empty-turn case found the actual rule:
+
+| Contents | Result |
+| --- | --- |
+| `[user, model, user with EMPTY parts]` | **400 "Requests ending with a model turn are not supported"** |
+| `[user, model, user(' ')]` | 200 |
+| `[user, model, model(' ')]` | 400 |
+| `[user, model, model with EMPTY parts]` | 400 |
+
+The upstream **ignores a turn that carries no parts**. An empty final user
+message therefore vanishes, the previous model turn becomes the effective last
+turn, and the request is rejected. A whitespace-only user turn *is* counted
+(the model then replies "It looks like your message was blank"), which is why
+the workaround works.
+
+Gateway behaviour added: an empty user turn is sent with a whitespace part,
+an empty model turn is dropped, empty system messages are omitted from the
+system instruction, and the existing "append a whitespace user turn when the
+conversation ends with a model turn" rule still applies.
+
+The failing shape is reproducible in one request — a 15-message alternating
+history whose final user message has empty content — and returns 200 through
+the gateway after the fix (live-verified 2026-10-22, including the same
+history with a final image message).
