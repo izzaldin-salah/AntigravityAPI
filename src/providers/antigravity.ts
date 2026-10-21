@@ -309,6 +309,11 @@ export class AntigravityProvider implements AIProvider {
       } catch {
         detail = undefined;
       }
+      if (detail && /model turn/i.test(detail)) {
+        // Self-diagnosing: show the role sequence the client sent.
+        const roles = request.messages.map((message) => message.role).join(" > ");
+        detail = `${detail} (request roles: ${roles})`;
+      }
       this.handleHttpError(response.status, detail);
     }
 

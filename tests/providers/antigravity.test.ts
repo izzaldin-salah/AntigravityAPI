@@ -896,6 +896,48 @@ describe("AntigravityProvider", () => {
       expect(contents[2]).toEqual({ role: "user", parts: [{ text: " " }] });
     });
 
+    it("reports the request roles when the upstream complains about a model turn", async () => {
+      const fakeFetch = vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              code: 400,
+              message: "Requests ending with a model turn are not supported.",
+              status: "INVALID_ARGUMENT",
+            },
+          }),
+          { status: 400 },
+        ),
+      ) as unknown as typeof fetch;
+
+      const provider = new AntigravityProvider(
+        { accessToken: "test-token", projectId: "test-proj" },
+        { fetch: fakeFetch },
+      );
+
+      const request: NormalizedChatRequest = {
+        model: "gemini-3.8-flash-high",
+        messages: [
+          { role: "system", content: "sys" },
+          { role: "user", content: "Hi" },
+          { role: "assistant", content: "Hello!" },
+        ],
+        stream: true,
+        requestId: "model-turn-error",
+      };
+
+      await expect(async () => {
+        for await (const _ of provider.chat(request)) {
+          // drain
+        }
+      }).rejects.toMatchObject({
+        payload: {
+          code: "invalid_request",
+          message: expect.stringContaining("request roles: system > user > assistant"),
+        },
+      });
+    });
+
     it("rejects a response schema the provider cannot express", async () => {
       const { provider } = createCapturingProvider(sse);
 
