@@ -137,6 +137,9 @@ export interface AIProvider {
    * Implemented by AntigravityProvider; optional for injected test providers.
    */
   getAccountStatus?(): Promise<import("./admin").AntigravityAccountStatus>;
+  getModelSettings?(): Promise<import("./model-settings").ModelSettingsSnapshot>;
+  discoverModels?(): Promise<import("./model-settings").ModelOption[]>;
+  updateModelSettings?(selection: import("./model-settings").ModelSelection): Promise<import("./model-settings").ModelSettingsSnapshot>;
 }
 
 export class ProviderError extends Error {

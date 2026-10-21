@@ -42,12 +42,32 @@ not load `.env` automatically; use the Node command above for local testing.
 Outside production,
 if `API_KEYS` is unset the implicit dev key is `dev-local-key`.
 
-`PROVIDER_MODE=antigravity` serves exactly one model —
-`gemini-3.8-flash-high` — for every chat request, regardless of the model
-name the client sends; `GET /v1/models` lists only that model. On the wire
-the request uses the account's `gemini-3.8-flash-tiered` SKU with
-`thinkingLevel: HIGH` (verified live 2026-10-17). The account connection is
-managed in the `/admin` dashboard.
+The gateway defaults to `gemini-3.8-flash-high` (upstream
+`gemini-3.8-flash-tiered` with HIGH thinking). In `/admin`, open **Model &
+thinking**, load your account models, choose a compatible text model and
+thinking level, then save. New chat requests and connection tests use that
+selection regardless of the model name the client sends; `GET /v1/models`
+lists the active public model. Existing requests retain their original settings.
+
+Thinking options depend on the model: Gemini 3/4 use supported LOW/MEDIUM/HIGH
+levels; original Gemini 3 Pro offers LOW/HIGH. Gemini 2.5 and thinking-enabled
+Claude models use gateway token-budget presets of 1,024 / 8,192 / 16,384 tokens;
+their upstream output limit includes that budget plus the requested output allowance
+(8,192 by default). Account capability metadata determines whether thinking
+controls are available; models without thinking support use provider-default
+behavior with no override. Image/audio models and unknown families are excluded.
+Model discovery and saving validate account availability but do not guarantee
+quota or a successful generation; use the connection test to verify access.
+
+Selections are stored independently of credentials: Redis uses
+`antigravity:model-settings:v1`; file storage uses
+`<CREDENTIAL_FILE_PATH>.model-settings.json`. File durability depends on the
+deployment disk and Redis durability on its configuration. Each server process
+loads its selection at startup/first use; a dashboard save updates that process
+immediately. This remains a single-instance gateway, not a synchronized
+multi-instance settings system. Invalid stored settings fail closed rather than
+silently routing requests to another model. The model-discovery and settings
+POST endpoints require an admin session and CSRF and return `no-store`.
 
 ### Example requests (dev defaults)
 
@@ -112,6 +132,10 @@ Open `http://localhost:3000/admin`, log in, and you can:
 - **copy client setup**: API base URL, model, and cURL/Python examples with an environment-variable key placeholder; reveal the first configured API key only on demand;
 - **inspect usage and recent requests**: provider attempts, reported input/output tokens, failures, cancellations, average duration, and the latest 50 metadata rows;
 - **check account and storage health**: expiry, last refresh, last successful request, credential-store availability, and persistence limitations.
+
+The usage panel charts request volume over time and response latency, both derived
+from the same recorded request metadata shown in the recent-requests table. The
+charts cover the retained request history only and are not estimated.
 
 Dashboard counters cover provider attempts from API calls and connection tests. They reset
 on restart, are local to this server instance, and omit requests rejected before reaching

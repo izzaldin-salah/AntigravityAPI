@@ -420,3 +420,20 @@ Fail-closed rules (deployment agent implements in zod schema):
 
 Also update §12's no-new-deps rule note: this wave still adds ZERO dependencies
 (node:crypto/net/tls/fetch only).
+
+## Admin model routing settings (2026-10-21)
+
+The admin-selected model and thinking level now replace the fixed model route.
+AIProvider exposes optional getModelSettings, discoverModels, and updateModelSettings
+methods. GET /v1/models lists the current public model; client model fields remain
+overridden by the gateway selection. Each chat snapshots settings before token
+resolution, preserving its selection through retries and streaming.
+
+POST /admin/actions/models discovers compatible account text models.
+POST /admin/actions/model-settings validates the selection against that catalog,
+persists it, then activates it. Both require an admin session plus CSRF and
+return Cache-Control: no-store. Failed validation or persistence retains the
+previous selection. Settings use a separate non-secret file or Redis key and
+do not change credential payloads. Saves are serialized per process; multiple
+server instances are not synchronized. See README.md for model-specific thinking
+behavior and persistence limitations.

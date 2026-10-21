@@ -6,7 +6,7 @@ import { MockTestProvider } from "../api/mock-provider";
 import { RequestTracker } from "../../src/core/request-tracker";
 import type { CredentialStore, OAuthService } from "../../src/types/admin";
 import type { ProviderEvent } from "../../src/types/provider";
-import { renderHealth, renderStorage, renderSetup, type OperationsViewData } from "../../src/admin/operations-view";
+import { renderHealth, renderStorage, renderSetup, renderUsage, type OperationsViewData } from "../../src/admin/operations-view";
 
 async function fixture(provider = new MockTestProvider()) {
   const config = loadConfig({ NODE_ENV: "test", LOG_LEVEL: "silent", ADMIN_PASSWORD: "admin-test", CREDENTIAL_ENCRYPTION_KEY: "test-key", API_KEYS: "API_SECRET_SENTINEL", CREDENTIAL_STORE: "file" });
@@ -154,5 +154,48 @@ describe("Operational status presentation", () => {
     expect(html).toContain("&lt;script&gt;");
     expect(html).toContain("ANTIGRAVITY_API_KEY");
     expect(html).toContain("https://gateway.example/v1");
+  });
+  it("keeps SVG element classes from colliding with layout classes", () => {
+    // `stroke` is an inherited SVG property. If a layout class name is reused
+    // on an SVG element (or vice versa), a stray stroke can wash out chart
+    // text or bars. Layout and SVG class names must stay disjoint.
+    const html = renderUsage({
+      ...data,
+      snapshot: {
+        ...data.snapshot,
+        requests: 3,
+        averageDurationMs: 120,
+        recent: [
+          { time: 1_000, model: "m", durationMs: 100, result: "success", source: "api" },
+          { time: 2_000, model: "m", durationMs: 140, result: "success", source: "api" },
+        ],
+      },
+    });
+    const svgClasses = new Set<string>();
+    for (const match of html.matchAll(/<svg[^>]*class="([^"]+)"/g)) {
+      for (const name of match[1]!.split(/\s+/)) svgClasses.add(name);
+    }
+    for (const match of html.matchAll(/<(line|rect|polyline|polygon|text)[^>]*class="([^"]+)"/g)) {
+      for (const name of match[2]!.split(/\s+/)) svgClasses.add(name);
+    }
+    // Any class applied to an SVG element must not also be used on a layout
+    // wrapper, and must not set a stroke that would inherit into text.
+    for (const name of svgClasses) {
+      expect(name).not.toBe("chart-layout");
+      expect(name).not.toBe("chart-layout-spaced");
+    }
+    expect(html).toContain("chart-rule");
+    expect(html).not.toContain('class="chart-grid"');
+  });
+  it("renders chart text with an explicit fill so inherited strokes cannot wash it out", () => {
+    const html = renderUsage({
+      ...data,
+      snapshot: {
+        ...data.snapshot,
+        recent: [{ time: 1_000, model: "m", durationMs: 100, result: "success", source: "api" }],
+      },
+    });
+    expect(html).toContain("chart-label");
+    expect(html).not.toMatch(/<text[^>]*class="chart-label"[^>]*stroke=/);
   });
 });

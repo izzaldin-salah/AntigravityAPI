@@ -13,14 +13,14 @@ import type { AntigravityAccountStatus, CredentialStore } from "../types/admin";
 import type { AntigravityCredentials } from "../types/config";
 import { TokenManager } from "./token-manager";
 import { parseSseStream } from "./sse";
+import type { ModelOption, ModelSelection, ModelSettingsSnapshot, ModelSettingsStore } from "../types/model-settings";
+import { DEFAULT_MODEL_SELECTION, modelOption, publicModel, thinkingConfig, validSelection } from "./model-policy";
 
 const DEFAULT_ANTIGRAVITY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 
 /**
- * The single model this gateway serves. Every chat request is routed to it
- * regardless of the model name the client requests — this is a personal
- * single-model proxy. Live-verified against the real Antigravity backend
- * on 2026-10-17 (non-stream + SSE streaming).
+ * Default public model. The admin dashboard can change the gateway-wide
+ * model and thinking selection; client model names do not override it.
  */
 export const ANTIGRAVITY_SERVED_MODEL = "gemini-3.8-flash-high";
 
@@ -62,6 +62,10 @@ export class AntigravityProvider implements AIProvider {
   private tokenManager: TokenManager;
   private endpoint: string;
   private fetchImpl: typeof fetch;
+  private selection: ModelSelection = { ...DEFAULT_MODEL_SELECTION };
+  private settingsStore?: ModelSettingsStore;
+  private settingsLoaded?: Promise<void>;
+  private settingsWrite: Promise<unknown> = Promise.resolve();
   private usage: UsageInfo = {
     promptTokens: 0,
     completionTokens: 0,
@@ -76,9 +80,11 @@ export class AntigravityProvider implements AIProvider {
       fetch?: typeof fetch;
       credentialStore?: CredentialStore;
       tokenEndpoint?: string;
+      modelSettingsStore?: ModelSettingsStore;
     } = {},
   ) {
     this.fetchImpl = options.fetch ?? globalThis.fetch;
+    this.settingsStore = options.modelSettingsStore;
     this.endpoint = (credentials.endpoint || DEFAULT_ANTIGRAVITY_ENDPOINT).replace(/\/+$/, "");
     this.tokenManager = new TokenManager({
       credentials,
@@ -97,7 +103,72 @@ export class AntigravityProvider implements AIProvider {
   }
 
   async listModels(): Promise<ModelInfo[]> {
-    return [...ANTIGRAVITY_STATIC_MODELS];
+    const settings = await this.getModelSettings();
+    return [{ id: settings.publicModel, object: "model", created: 1720000000, owned_by: "google-antigravity" }];
+  }
+
+  async getModelSettings(): Promise<ModelSettingsSnapshot> {
+    this.settingsLoaded ??= (async () => {
+      const saved = await this.settingsStore?.load();
+      if (saved) {
+        if (!validSelection(saved)) throw new Error("Stored model settings are invalid.");
+        this.selection = { model: saved.model, thinkingLevel: saved.thinkingLevel };
+      }
+    })();
+    const loading = this.settingsLoaded;
+    try { await loading; }
+    catch (error) {
+      if (this.settingsLoaded === loading) this.settingsLoaded = undefined;
+      throw error;
+    }
+    return { ...this.selection, publicModel: publicModel(this.selection), storage: this.settingsStore?.backend ?? "memory" };
+  }
+
+  async discoverModels(): Promise<ModelOption[]> {
+    const signal = AbortSignal.timeout(15000);
+    let token = await this.tokenManager.getAccessToken(signal);
+    const call = () => this.fetchImpl(`${this.endpoint}/v1internal:fetchAvailableModels`, {
+      method: "POST", signal,
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "User-Agent": "antigravity" },
+      body: JSON.stringify({ project: this.tokenManager.getProjectId() || "default" }),
+    });
+    let response = await call();
+    if (response.status === 401) { token = await this.tokenManager.refreshAccessToken(signal); response = await call(); }
+    if (!response.ok) this.handleHttpError(response.status);
+    const data = await response.json() as { models?: unknown };
+    if (!data?.models || typeof data.models !== "object" || Array.isArray(data.models)) {
+      throw new ProviderError({ code: "upstream_error", message: "The provider returned an invalid model catalog.", status: 502 });
+    }
+    // Return only safe, supported metadata, never arbitrary upstream fields.
+    return Object.entries(data.models).flatMap(([id, metadata]) => {
+      const option = modelOption(id);
+      if (!option) return [];
+      const name = metadata && typeof metadata === "object" && "displayName" in metadata ? metadata.displayName : undefined;
+      if (typeof name === "string" && name.length <= 120) option.name = name;
+      const supportsThinking = metadata && typeof metadata === "object" && "supportsThinking" in metadata ? metadata.supportsThinking : undefined;
+      if (supportsThinking === false || (id.startsWith("claude-") && !id.endsWith("-thinking") && supportsThinking !== true)) {
+        option.thinkingLevels = [];
+      }
+      return [option];
+    }).sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  async updateModelSettings(selection: ModelSelection): Promise<ModelSettingsSnapshot> {
+    if (!validSelection(selection)) throw new ProviderError({ code: "invalid_request", message: "Choose a supported model and thinking level.", status: 400 });
+    const next = { model: selection.model, thinkingLevel: selection.thinkingLevel };
+    const update = this.settingsWrite.then(async () => {
+      await this.getModelSettings();
+      const available = await this.discoverModels();
+      const option = available.find(model => model.id === next.model);
+      if (!option || (option.thinkingLevels.length ? !option.thinkingLevels.includes(next.thinkingLevel!) : next.thinkingLevel !== null)) {
+        throw new ProviderError({ code: "invalid_request", message: "This model is not available to the connected account. Reload the model list.", status: 400 });
+      }
+      await this.settingsStore?.save(next);
+      this.selection = next;
+      return this.getModelSettings();
+    });
+    this.settingsWrite = update.catch(() => undefined);
+    return update;
   }
 
   async *chat(request: NormalizedChatRequest): AsyncIterable<ProviderEvent> {
@@ -118,15 +189,16 @@ export class AntigravityProvider implements AIProvider {
       });
     }
 
-    // Single-model gateway: every request is routed to the served model,
-    // regardless of the model name the client requested.
-    const effectiveModel = ANTIGRAVITY_SERVED_MODEL;
+    // Snapshot before awaiting credentials so concurrent admin changes cannot
+    // mix an old public label with a new upstream model or thinking level.
+    const selection = await this.getModelSettings();
+    const effectiveModel = selection.publicModel;
 
     // Step 1: Resolve access token
     let accessToken = await this.tokenManager.getAccessToken(request.signal);
 
     const streamUrl = `${this.endpoint}/v1internal:streamGenerateContent?alt=sse`;
-    const upstreamBody = this.buildUpstreamRequest(request);
+    const upstreamBody = this.buildUpstreamRequest(request, selection);
 
     // Step 2: Call upstream with at most one refresh retry on 401
     let response: Response;
@@ -311,11 +383,11 @@ export class AntigravityProvider implements AIProvider {
     return {
       ok: true,
       detail:
-        "Antigravity provider initialized. Serves gemini-3.8-flash-high for all requests (live backend verified 2026-10-17).",
+        "Antigravity provider initialized. Model and thinking are managed in the admin dashboard.",
     };
   }
 
-  private buildUpstreamRequest(request: NormalizedChatRequest): Record<string, unknown> {
+  private buildUpstreamRequest(request: NormalizedChatRequest, selection: ModelSelection): Record<string, unknown> {
     const systemMessages = request.messages.filter((m) => m.role === "system");
     const nonSystemMessages = request.messages.filter((m) => m.role !== "system");
 
@@ -353,23 +425,15 @@ export class AntigravityProvider implements AIProvider {
           }
         : undefined;
 
-    const generationConfig: Record<string, unknown> = {};
+    const generationConfig: Record<string, unknown> = thinkingConfig(selection, request.maxTokens);
     if (request.temperature !== undefined) generationConfig.temperature = request.temperature;
     if (request.topP !== undefined) generationConfig.topP = request.topP;
-    if (request.maxTokens !== undefined) generationConfig.maxOutputTokens = request.maxTokens;
-    // Gemini 3.x thinking routes: the "-high" wire SKU is paired with an
-    // explicit thinkingLevel, mirroring OMP's google-antigravity catalog
-    // (effortRouting high -> gemini-3.8-flash-high + thinkingLevel HIGH).
-    generationConfig.thinkingConfig = {
-      includeThoughts: true,
-      thinkingLevel: "HIGH",
-    };
 
     const projectId = this.tokenManager.getProjectId() || "default";
 
     return {
       project: projectId,
-      model: ANTIGRAVITY_WIRE_MODEL,
+      model: selection.model,
       request: {
         contents,
         ...(systemInstruction ? { systemInstruction } : {}),

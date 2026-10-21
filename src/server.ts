@@ -6,6 +6,7 @@
 import { buildApp } from "./app";
 import { loadConfig } from "./config/env";
 import { UsageTracker } from "./core/usage-tracker";
+import { createModelSettingsStore } from "./core/model-settings-store";
 import { registerSecurityPlugins } from "./middleware";
 import { createProviderFromConfig } from "./providers";
 import { createOAuthService } from "./providers/oauth";
@@ -31,6 +32,7 @@ async function main(): Promise<void> {
   const provider = createProviderFromConfig(config.provider, {
     credentialStore,
     tokenEndpoint: config.oauth.tokenEndpoint,
+    modelSettingsStore: createModelSettingsStore(config.credentials),
   });
 
   const usageTracker = new UsageTracker();

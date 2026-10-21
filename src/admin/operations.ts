@@ -7,6 +7,8 @@ import { verifyCsrfToken } from "../security/csrf";
 import { ProviderError, type AIProvider } from "../types/provider";
 import type { SessionStore } from "../types/admin";
 import type { AppConfig } from "../types/config";
+import { buildLatencySpec, buildVolumeSpec } from "./charts";
+import type { ModelSelection } from "../types/model-settings";
 
 export function registerOperations(app: FastifyInstance, deps: {
   config: AppConfig; provider: AIProvider; sessionStore: SessionStore; requestTracker: RequestTracker;
@@ -31,11 +33,44 @@ export function registerOperations(app: FastifyInstance, deps: {
         return reply.code(403).send({ error: "Your session has expired or the form token is invalid. Refresh the dashboard and try again." });
       }
     });
-    scope.get("/admin/api/operations", async () => deps.requestTracker.snapshot());
+    scope.get("/admin/api/operations", async () => {
+      const snapshot = deps.requestTracker.snapshot();
+      return {
+        ...snapshot,
+        // Chart geometry is derived from the same rows the table shows, so the
+        // browser can repaint the charts without recomputing anything itself.
+        charts: {
+          volume: buildVolumeSpec(snapshot.recent),
+          latency: buildLatencySpec(snapshot.recent),
+        },
+      };
+    });
     scope.post("/admin/actions/api-key", async (_request, reply) => {
       const key = deps.config.apiKeys[0];
       if (!key) return reply.code(404).send({ error: "No API key is configured." });
       return { key };
+    });
+    scope.post("/admin/actions/models", async (_request, reply) => {
+      if (!deps.provider.discoverModels) return reply.code(501).send({ error: "Model selection is unavailable for this provider." });
+      try { return { models: await deps.provider.discoverModels() }; }
+      catch { return reply.code(502).send({ error: "Could not load account models. Check your connection and try again. Your active settings have not changed." }); }
+    });
+    scope.post("/admin/actions/model-settings", async (request, reply) => {
+      if (!deps.provider.updateModelSettings) return reply.code(501).send({ error: "Model selection is unavailable for this provider." });
+      const body = request.body as Record<string, unknown> | null;
+      if (!body || typeof body.model !== "string" || body.model.length > 120 ||
+        (body.thinkingLevel !== null && !["low", "medium", "high"].includes(String(body.thinkingLevel)))) {
+        return reply.code(400).send({ error: "Choose a model and a valid thinking level." });
+      }
+      try {
+        const settings = await deps.provider.updateModelSettings({ model: body.model, thinkingLevel: body.thinkingLevel } as ModelSelection);
+        return { ok: true, settings };
+      } catch (error) {
+        if (error instanceof ProviderError && error.payload.code === "invalid_request") {
+          return reply.code(400).send({ error: "This model or thinking level is unavailable. Reload the model list and choose a supported combination." });
+        }
+        return reply.code(503).send({ error: "Could not validate or save the settings. Check your connection and storage, then try again. The previous settings remain active." });
+      }
     });
     scope.post("/admin/actions/test-connection", async (request, reply) => {
       if (running || Date.now() < nextAllowedAt) {

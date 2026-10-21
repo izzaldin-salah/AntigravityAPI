@@ -316,6 +316,6 @@ describe("AntigravityProvider", () => {
     const provider = new AntigravityProvider();
     const health = await provider.healthCheck();
     expect(health.ok).toBe(true);
-    expect(health.detail).toContain("gemini-3.8-flash-high");
+    expect(health.detail).toContain("initialized");
   });
 });

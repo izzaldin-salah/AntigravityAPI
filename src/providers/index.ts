@@ -3,6 +3,7 @@ import type { ProviderConfig } from "../types/config";
 import type { AIProvider } from "../types/provider";
 import { ProviderError } from "../types/provider";
 import { AntigravityProvider } from "./antigravity";
+import type { ModelSettingsStore } from "../types/model-settings";
 
 export { AntigravityProvider } from "./antigravity";
 export { TokenManager } from "./token-manager";
@@ -11,12 +12,13 @@ export { createOAuthService, createPkcePair, maskEmail } from "./oauth";
 
 export function createProviderFromConfig(
   config: ProviderConfig,
-  deps?: { credentialStore?: CredentialStore; tokenEndpoint?: string },
+  deps?: { credentialStore?: CredentialStore; tokenEndpoint?: string; modelSettingsStore?: ModelSettingsStore },
 ): AIProvider {
   if (config.mode === "antigravity") {
     return new AntigravityProvider(config.credentials, {
       credentialStore: deps?.credentialStore,
       tokenEndpoint: deps?.tokenEndpoint,
+      modelSettingsStore: deps?.modelSettingsStore,
     });
   }
 

@@ -247,6 +247,7 @@ export function createAdminRoutes(
     const credHealth = await credentialStore.health();
     const flash = popFlash(session.id);
     const models = await provider.listModels().catch(() => []);
+    const modelSettings = await provider.getModelSettings?.().catch(() => undefined);
     let baseUrl = `${request.protocol}://${request.host}`;
     if (config.oauth.redirectBaseUrl) {
       try {
@@ -269,6 +270,8 @@ export function createAdminRoutes(
           apiKeyCount: config.apiKeys.length, isRender: process.env.RENDER === "true",
           encryptedStore: Boolean(config.credentials.encryptionKey),
           hasTokenCache: Boolean(config.provider.credentials.tokenStorePath),
+          modelSettings,
+          modelSettingsAvailable: Boolean(provider.getModelSettings),
         },
       }),
     );

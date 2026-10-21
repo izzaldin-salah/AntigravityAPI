@@ -1,6 +1,7 @@
 import * as net from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { RedisLite, RedisLiteError } from "../../src/security/redis-lite";
+import { createModelSettingsStore } from "../../src/core/model-settings-store";
 
 describe("RedisLite (tests/security/redis-lite.test.ts)", () => {
   let server: net.Server;
@@ -159,6 +160,16 @@ describe("RedisLite (tests/security/redis-lite.test.ts)", () => {
     expect(await client.del("test-key")).toBe(0);
 
     await client.close();
+  });
+
+  it("persists model settings separately from credentials across store instances", async () => {
+    inMemoryDb.set("antigravity:credentials:v1", "untouched-credential-envelope");
+    const config = { backend: "auto" as const, redisUrl: `redis://127.0.0.1:${serverPort}`, filePath: "unused" };
+    const first = createModelSettingsStore(config);
+    expect(first.backend).toBe("redis");
+    await first.save({ model: "gemini-3.1-pro-preview", thinkingLevel: "medium" });
+    expect(await createModelSettingsStore(config).load()).toEqual({ model: "gemini-3.1-pro-preview", thinkingLevel: "medium" });
+    expect(inMemoryDb.get("antigravity:credentials:v1")).toBe("untouched-credential-envelope");
   });
 
   it("surfaces Redis error replies as typed RedisLiteError", async () => {
