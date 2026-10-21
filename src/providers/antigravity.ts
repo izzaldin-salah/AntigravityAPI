@@ -67,6 +67,36 @@ export interface AntigravityProviderOptions {
   fetch?: typeof fetch;
 }
 
+/**
+ * Extract a short, safe explanation from an upstream error body.
+ *
+ * The body can echo fragments of the request (for example the rejected
+ * field), so it is whitespace-collapsed, scrubbed of long base64-ish runs and
+ * truncated before it reaches a log line or a client response.
+ */
+function extractUpstreamError(body: string): string | undefined {
+  const trimmed = body.trim();
+  if (!trimmed) return undefined;
+  let message = trimmed;
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      error?: { message?: unknown } | string;
+    };
+    const candidate =
+      typeof parsed.error === "string" ? parsed.error : parsed.error?.message;
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      message = candidate;
+    }
+  } catch {
+    // Not JSON: fall back to the raw text.
+  }
+  const cleaned = message
+    .replace(/\s+/g, " ")
+    .replace(/[A-Za-z0-9+/]{160,}={0,2}/g, "[data omitted]")
+    .trim();
+  return cleaned.length > 0 ? cleaned.slice(0, 400) : undefined;
+}
+
 export class AntigravityProvider implements AIProvider {
   readonly id = "antigravity";
 
@@ -270,7 +300,16 @@ export class AntigravityProvider implements AIProvider {
     }
 
     if (!response.ok) {
-      this.handleHttpError(response.status);
+      // Surface WHY the upstream rejected the request (e.g. an invalid image
+      // payload) instead of a bare status code. The body is scrubbed and
+      // truncated; it can echo fragments of the request but never credentials.
+      let detail: string | undefined;
+      try {
+        detail = extractUpstreamError(await response.text());
+      } catch {
+        detail = undefined;
+      }
+      this.handleHttpError(response.status, detail);
     }
 
     if (!response.body) {
@@ -527,6 +566,16 @@ export class AntigravityProvider implements AIProvider {
       contents.push({ role: "user", parts: [{ text: plan.forcedDirective }] });
     }
 
+    // The backend rejects a conversation that ends with a model turn
+    // ("Requests ending with a model turn are not supported"), so a client
+    // that sends the assistant's last message (history echo or prefill) gets
+    // a 400. A whitespace-only user turn satisfies the backend; the model
+    // then answers as if the user had sent a blank message.
+    const lastContent = contents[contents.length - 1];
+    if (lastContent && lastContent.role === "model") {
+      contents.push({ role: "user", parts: [{ text: " " }] });
+    }
+
     const systemInstruction =
       systemMessages.length > 0
         ? {
@@ -599,6 +648,12 @@ export class AntigravityProvider implements AIProvider {
     this.toolSignatures.set(id, signature);
   }
 
+  /**
+   * Map an upstream HTTP status to a canonical provider error.
+   *
+   * `message` carries the upstream's own explanation when one was read from
+   * the response body (see `extractUpstreamError`).
+   */
   private handleHttpError(status: number, message?: string): never {
     const defaultMsg = message ?? `Antigravity upstream returned status ${status}.`;
     if (status === 400) {

@@ -385,6 +385,53 @@ describe("personal-antigravity-api API endpoints", () => {
     await app.close();
   });
 
+  it("POST /v1/chat/completions rejects images the provider cannot fetch", async () => {
+    const provider = new MockTestProvider();
+    const app = await buildApp({ config: testConfig, provider });
+
+    for (const url of [
+      "http://127.0.0.1:3000/screenshot.png",
+      "http://localhost:8080/shot.png",
+      "http://192.168.1.20/shot.png",
+    ]) {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        payload: {
+          model: "model",
+          messages: [
+            {
+              role: "user",
+              content: [{ type: "image_url", image_url: { url } }],
+            },
+          ],
+        },
+      });
+      expect(res.statusCode, `Expected 400 for ${url}`).toBe(400);
+      expect(res.json().error.message).toContain("base64 data URL");
+    }
+
+    const emptyRes = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: {
+        model: "model",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "image_url", image_url: { url: "data:image/png;base64," } },
+            ],
+          },
+        ],
+      },
+    });
+    expect(emptyRes.statusCode).toBe(400);
+    expect(emptyRes.json().error.message).toContain("empty");
+
+    await app.close();
+  });
+
   it("POST /v1/chat/completions (streaming) yields correct SSE chunk sequence", async () => {
     const provider = new MockTestProvider({
       chatHandler: async function* (req) {

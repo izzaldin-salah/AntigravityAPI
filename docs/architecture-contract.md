@@ -220,6 +220,19 @@ Vision and structured output (Antigravity provider; live-verified 2026-10-22):
 - in JSON mode the gateway strips a Markdown fence the upstream may add around
   the payload, so `JSON.parse(message.content)` succeeds as with OpenAI.
 
+Backend request-shape constraints (live-verified 2026-10-22) and how the
+gateway absorbs them:
+- the upstream rejects a conversation that **ends with a model turn**
+  ("Requests ending with a model turn are not supported") — the provider
+  appends a whitespace-only user turn in that case;
+- image shapes that the upstream rejects: base64 payload that still contains
+  the `data:` prefix ("Base64 decoding failed"), an empty payload ("Unable to
+  process input image"), an unreachable URL ("Cannot fetch content from the
+  provided URL"), and an image inside a model turn. The gateway validates the
+  empty payload and private/local image URLs itself and returns a clear 400;
+- an upstream error body is read, scrubbed of long base64 runs, truncated and
+  returned in the error message, so a 400 explains itself.
+
 Provider error code -> HTTP:
 
 | Provider code | HTTP | type | code |

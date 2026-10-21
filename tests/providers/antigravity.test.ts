@@ -873,6 +873,29 @@ describe("AntigravityProvider", () => {
       });
     });
 
+    it("appends a whitespace user turn when the conversation ends with an assistant turn", async () => {
+      // The backend rejects a conversation that ends with a model turn.
+      const { provider, readBody } = createCapturingProvider(sse);
+
+      const request: NormalizedChatRequest = {
+        model: "gemini-3.8-flash-high",
+        messages: [
+          { role: "user", content: "Hi" },
+          { role: "assistant", content: "Hello!" },
+        ],
+        stream: true,
+        requestId: "trailing-assistant-turn",
+      };
+
+      for await (const _ of provider.chat(request)) {
+        // drain
+      }
+
+      const contents = readBody().request?.contents ?? [];
+      expect(contents).toHaveLength(3);
+      expect(contents[2]).toEqual({ role: "user", parts: [{ text: " " }] });
+    });
+
     it("rejects a response schema the provider cannot express", async () => {
       const { provider } = createCapturingProvider(sse);
 

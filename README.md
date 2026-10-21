@@ -175,9 +175,20 @@ agents work:
 - a **base64 data URL** is sent as an inline image payload;
 - an **http(s) URL** is passed through for the provider to fetch — the gateway
   never fetches a client-supplied URL itself, so it cannot be used to reach
-  internal network addresses;
+  internal network addresses; private and local addresses (`localhost`,
+  `127.x`, `10.x`, `192.168.x`, …) are rejected up front with guidance,
+  because the provider cannot reach them either;
 - limits: 8 MB per image, 25 MB per request;
-- audio input is not supported and is rejected with a clear error.
+- audio input is not supported and is rejected with a clear error;
+- if the provider rejects a request, **its own explanation is returned**
+  (for example *"Cannot fetch content from the provided URL"*) instead of a
+  bare status code, so a rejected image tells you what was wrong.
+
+> The upstream requires the conversation to **end with a user turn**. If your
+> client sends the assistant's last message (a history echo or a prefill), the
+> gateway appends a whitespace-only user turn so the request is accepted
+> instead of failing with *"Requests ending with a model turn are not
+> supported"*.
 
 ### Structured output (`response_format`)
 

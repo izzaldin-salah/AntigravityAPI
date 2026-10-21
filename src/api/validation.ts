@@ -33,6 +33,30 @@ const MIME_BY_EXTENSION: Record<string, string> = {
   svg: "image/svg+xml",
 };
 
+/**
+ * Addresses the provider cannot fetch from: the upstream downloads remote
+ * images itself, so a private or local address is unreachable for it
+ * ("Cannot fetch content from the provided URL").
+ */
+function isUnreachableHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host.endsWith(".localhost")) return true;
+  if (host.endsWith(".local") || host.endsWith(".internal")) return true;
+  if (host === "::1" || host === "0.0.0.0") return true;
+  if (/^f[cd][0-9a-f]{2}:/i.test(host)) return true; // unique local IPv6
+  if (/^fe[89ab][0-9a-f]:/i.test(host)) return true; // link-local IPv6
+  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (ipv4) {
+    const a = Number(ipv4[1]);
+    const b = Number(ipv4[2]);
+    if (a === 127 || a === 10 || a === 0) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 169 && b === 254) return true;
+  }
+  return false;
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -69,6 +93,11 @@ function parseImagePart(url: string, index: number): ImagePart {
       );
     }
     const data = match[3].replace(/\s+/g, "");
+    if (data.length === 0) {
+      throw contentError(
+        `Image at message index ${index} is empty. Send the image bytes or a reachable URL.`,
+      );
+    }
     const bytes = Math.floor((data.length * 3) / 4);
     if (bytes > MAX_IMAGE_BYTES) {
       throw contentError(
@@ -88,6 +117,11 @@ function parseImagePart(url: string, index: number): ImagePart {
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw contentError(
       `Image at message index ${index} uses the unsupported scheme '${parsed.protocol}'. Use http(s) or a base64 data URL.`,
+    );
+  }
+  if (isUnreachableHost(parsed.hostname)) {
+    throw contentError(
+      `Image at message index ${index} points at '${parsed.hostname}'. The provider downloads remote images itself and cannot reach private or local addresses — send the image as a base64 data URL instead.`,
     );
   }
   const extension = parsed.pathname.split(".").pop()?.toLowerCase() ?? "";

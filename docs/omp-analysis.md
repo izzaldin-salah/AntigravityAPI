@@ -289,3 +289,34 @@ Implementation:
 - `src/core/json-fence.ts` — fence stripping for JSON mode.
 - `tests/providers/json-schema.test.ts`, `tests/api/json-fence.test.ts` and
   additions to `tests/providers/antigravity.test.ts` / `tests/api/api.test.ts`.
+
+---
+
+## 14. Backend Request-Shape Constraints (probed 2026-10-22)
+
+Probing the live backend with the real account revealed four shapes it rejects. The gateway now absorbs or pre-empts each one:
+
+| Request shape | Upstream result |
+| --- | --- |
+| `inlineData` with the correct mime | 200 — image read correctly |
+| `inlineData` whose `data` still contains the `data:image/...;base64,` prefix | 400 "Base64 decoding failed" |
+| `inlineData` with an empty payload | 400 "Unable to process input image" |
+| `fileData` with a URL the upstream cannot fetch | 400 "Cannot fetch content from the provided URL. … URL_ERROR-ERROR_NOT_FOUND" |
+| an image inside a model (assistant) turn | 400 "Requests ending with a model turn are not supported" |
+| mime type not matching the bytes (jpeg label on PNG data), `fileData` without a mime type, several images in one turn, an image with no text | 200 — the upstream is lenient about these |
+
+The **trailing model turn** rule is the important one: the backend rejects **any**
+conversation whose last content is a model turn — including plain text, with no
+image involved. A chat client that echoes the assistant's last message (or
+prefills it) therefore gets a 400. The gateway appends a whitespace-only user
+turn in that case; the backend accepts it (an *empty* text part does not work —
+it is rejected the same way).
+
+Gateway behaviour added in response:
+- upstream error bodies are read, scrubbed of long base64 runs, truncated to
+  400 characters and returned in the error message, so a 400 explains itself
+  instead of reporting a bare status;
+- image URLs pointing at private/local addresses are rejected before the
+  request leaves the gateway, because the upstream (which does the fetching)
+  cannot reach them either;
+- empty image payloads are rejected before the request leaves the gateway.
