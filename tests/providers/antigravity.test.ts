@@ -318,4 +318,407 @@ describe("AntigravityProvider", () => {
     expect(health.ok).toBe(true);
     expect(health.detail).toContain("initialized");
   });
+
+  describe("tool calling", () => {
+    interface UpstreamBody {
+      model?: string;
+      request?: {
+        contents?: Array<{
+          role: string;
+          parts?: Array<Record<string, unknown>>;
+        }>;
+        tools?: Array<{
+          functionDeclarations: Array<{
+            name: string;
+            description?: string;
+            parameters?: Record<string, unknown>;
+          }>;
+        }>;
+        toolConfig?: {
+          functionCallingConfig: { mode: string; allowedFunctionNames?: string[] };
+        };
+      };
+    }
+
+    const weatherTool = {
+      type: "function" as const,
+      function: {
+        name: "get_weather",
+        description: "Look up the weather for a city.",
+        parameters: {
+          type: "object",
+          properties: { city: { type: "string" } },
+          required: ["city"],
+        },
+      },
+    };
+
+    function createCapturingProvider(sseLines: string[]) {
+      let body: UpstreamBody = {};
+      const fakeFetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        body = JSON.parse(String(init?.body)) as UpstreamBody;
+        return new Response(createSseStream(sseLines), {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      }) as unknown as typeof fetch;
+      const provider = new AntigravityProvider(
+        { accessToken: "test-token", projectId: "test-proj" },
+        { fetch: fakeFetch },
+      );
+      return { provider, readBody: () => body };
+    }
+
+    it("forwards tool declarations upstream and uses the default VALIDATED mode", async () => {
+      const { provider, readBody } = createCapturingProvider([
+        'data: {"response":{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}}\n\n',
+        "data: [DONE]\n\n",
+      ]);
+
+      const request: NormalizedChatRequest = {
+        model: "gemini-3.8-flash-high",
+        messages: [{ role: "user", content: "weather in Paris?" }],
+        stream: true,
+        requestId: "tools-default-mode",
+        tools: [weatherTool],
+      };
+
+      for await (const _ of provider.chat(request)) {
+        // drain
+      }
+
+      const body = readBody();
+      expect(body.request?.tools).toEqual([
+        {
+          functionDeclarations: [
+            {
+              name: "get_weather",
+              description: "Look up the weather for a city.",
+              parameters: {
+                type: "object",
+                properties: { city: { type: "string" } },
+                required: ["city"],
+              },
+            },
+          ],
+        },
+      ]);
+      expect(body.request?.toolConfig).toEqual({
+        functionCallingConfig: { mode: "VALIDATED" },
+      });
+    });
+
+    it("does not declare tools when the client forbids tool use", async () => {
+      const { provider, readBody } = createCapturingProvider([
+        'data: {"response":{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}}\n\n',
+        "data: [DONE]\n\n",
+      ]);
+
+      const request: NormalizedChatRequest = {
+        model: "gemini-3.8-flash-high",
+        messages: [{ role: "user", content: "no tools please" }],
+        stream: true,
+        requestId: "tools-none",
+        tools: [weatherTool],
+        toolChoice: "none",
+      };
+
+      for await (const _ of provider.chat(request)) {
+        // drain
+      }
+
+      const body = readBody();
+      expect(body.request?.tools).toBeUndefined();
+      expect(body.request?.toolConfig).toBeUndefined();
+    });
+
+    it("forces a tool call with ANY mode and a transcript directive", async () => {
+      const { provider, readBody } = createCapturingProvider([
+        'data: {"response":{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}}\n\n',
+        "data: [DONE]\n\n",
+      ]);
+
+      const request: NormalizedChatRequest = {
+        model: "gemini-3.8-flash-high",
+        messages: [{ role: "user", content: "weather in Paris?" }],
+        stream: true,
+        requestId: "tools-required",
+        tools: [weatherTool],
+        toolChoice: "required",
+      };
+
+      for await (const _ of provider.chat(request)) {
+        // drain
+      }
+
+      const body = readBody();
+      expect(body.request?.toolConfig).toEqual({
+        functionCallingConfig: { mode: "ANY" },
+      });
+      const contents = body.request?.contents ?? [];
+      const last = contents[contents.length - 1];
+      expect(last.role).toBe("user");
+      expect(String(last.parts?.[0]?.text)).toContain("tool call");
+    });
+
+    it("maps a named tool choice to allowedFunctionNames", async () => {
+      const { provider, readBody } = createCapturingProvider([
+        'data: {"response":{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}}\n\n',
+        "data: [DONE]\n\n",
+      ]);
+
+      const request: NormalizedChatRequest = {
+        model: "gemini-3.8-flash-high",
+        messages: [{ role: "user", content: "weather in Paris?" }],
+        stream: true,
+        requestId: "tools-named",
+        tools: [weatherTool],
+        toolChoice: { type: "function", function: { name: "get_weather" } },
+      };
+
+      for await (const _ of provider.chat(request)) {
+        // drain
+      }
+
+      expect(readBody().request?.toolConfig).toEqual({
+        functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["get_weather"] },
+      });
+    });
+
+    it("maps tool results to a functionResponse turn and merges parallel results", async () => {
+      const { provider, readBody } = createCapturingProvider([
+        'data: {"response":{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}}\n\n',
+        "data: [DONE]\n\n",
+      ]);
+
+      const request: NormalizedChatRequest = {
+        model: "gemini-3.8-flash-high",
+        messages: [
+          { role: "user", content: "weather in Paris?" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_abc",
+                type: "function",
+                function: { name: "get_weather", arguments: '{"city":"Paris"}' },
+              },
+              {
+                id: "call_def",
+                type: "function",
+                function: { name: "get_time", arguments: "{}" },
+              },
+            ],
+          },
+          { role: "tool", content: "18C", tool_call_id: "call_abc" },
+          { role: "tool", content: "12:00", tool_call_id: "call_def" },
+        ],
+        stream: true,
+        requestId: "tools-results",
+        tools: [weatherTool],
+      };
+
+      for await (const _ of provider.chat(request)) {
+        // drain
+      }
+
+      const contents = readBody().request?.contents ?? [];
+      expect(contents).toHaveLength(3);
+      expect(contents[1]).toEqual({
+        role: "model",
+        parts: [
+          {
+            functionCall: {
+              name: "get_weather",
+              args: { city: "Paris" },
+              id: "call_abc",
+            },
+          },
+          { functionCall: { name: "get_time", args: {}, id: "call_def" } },
+        ],
+      });
+      // Cloud Code Assist wants every function response of a turn merged into
+      // a single user turn.
+      expect(contents[2]).toEqual({
+        role: "user",
+        parts: [
+          { functionResponse: { name: "get_weather", response: { output: "18C" } } },
+          { functionResponse: { name: "get_time", response: { output: "12:00" } } },
+        ],
+      });
+    });
+
+    it("emits one tool_call_delta per call and reports tool_calls as the finish reason", async () => {
+      const { provider } = createCapturingProvider([
+        'data: {"response":{"responseId":"resp_tools","candidates":[{"content":{"parts":[{"functionCall":{"id":"fc1","name":"get_weather","args":{"city":"Paris"}}}]}}]}}\n\n',
+        'data: {"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"fc2","name":"get_time","args":{}}}]}}]}}\n\n',
+        'data: {"response":{"candidates":[{"finishReason":"STOP"}]}}\n\n',
+        "data: [DONE]\n\n",
+      ]);
+
+      const request: NormalizedChatRequest = {
+        model: "gemini-3.8-flash-high",
+        messages: [{ role: "user", content: "weather and time?" }],
+        stream: true,
+        requestId: "tools-stream",
+        tools: [weatherTool],
+      };
+
+      const events = [];
+      for await (const event of provider.chat(request)) {
+        events.push(event);
+      }
+
+      const toolEvents = events.filter((event) => event.type === "tool_call_delta");
+      expect(toolEvents).toHaveLength(2);
+      expect(toolEvents[0]).toMatchObject({
+        type: "tool_call_delta",
+        index: 0,
+        id: "fc1",
+        name: "get_weather",
+        argumentsDelta: '{"city":"Paris"}',
+      });
+      expect(toolEvents[1]).toMatchObject({
+        type: "tool_call_delta",
+        index: 1,
+        id: "fc2",
+        name: "get_time",
+        argumentsDelta: "{}",
+      });
+      expect(events[events.length - 1]).toMatchObject({
+        type: "done",
+        finishReason: "tool_calls",
+      });
+    });
+
+    it("mints a tool call id when the upstream does not provide one", async () => {
+      const { provider } = createCapturingProvider([
+        'data: {"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"get_weather","args":{"city":"Paris"}}}]}}]}}\n\n',
+        'data: {"response":{"candidates":[{"finishReason":"STOP"}]}}\n\n',
+        "data: [DONE]\n\n",
+      ]);
+
+      const request: NormalizedChatRequest = {
+        model: "gemini-3.8-flash-high",
+        messages: [{ role: "user", content: "weather?" }],
+        stream: true,
+        requestId: "tools-generated-id",
+        tools: [weatherTool],
+      };
+
+      const events = [];
+      for await (const event of provider.chat(request)) {
+        events.push(event);
+      }
+
+      const toolEvent = events.find((event) => event.type === "tool_call_delta");
+      expect(toolEvent).toMatchObject({ type: "tool_call_delta", index: 0 });
+      expect(String((toolEvent as { id?: string }).id)).toMatch(/^call_[0-9a-f]{16}$/);
+    });
+
+    it("replays the thought signature with the follow-up function call", async () => {
+      // One provider instance handles both turns, exactly like the gateway.
+      const bodies: UpstreamBody[] = [];
+      let call = 0;
+      const fakeFetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        call += 1;
+        bodies.push(JSON.parse(String(init?.body)) as UpstreamBody);
+        const lines =
+          call === 1
+            ? [
+                'data: {"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"fc1","name":"get_weather","args":{"city":"Paris"}},"thoughtSignature":"SIG-123"}]}}]}}\n\n',
+                "data: [DONE]\n\n",
+              ]
+            : [
+                'data: {"response":{"candidates":[{"content":{"parts":[{"text":"18C"}]}}]}}\n\n',
+                "data: [DONE]\n\n",
+              ];
+        return new Response(createSseStream(lines), {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      }) as unknown as typeof fetch;
+
+      const provider = new AntigravityProvider(
+        { accessToken: "test-token", projectId: "test-proj" },
+        { fetch: fakeFetch },
+      );
+
+      const firstRequest: NormalizedChatRequest = {
+        model: "gemini-3.8-flash-high",
+        messages: [{ role: "user", content: "weather?" }],
+        stream: true,
+        requestId: "tools-signature-first",
+        tools: [weatherTool],
+      };
+      for await (const _ of provider.chat(firstRequest)) {
+        // drain
+      }
+
+      // The client answers the tool call in the next turn.
+      const secondRequest: NormalizedChatRequest = {
+        model: "gemini-3.8-flash-high",
+        messages: [
+          { role: "user", content: "weather?" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "fc1",
+                type: "function",
+                function: { name: "get_weather", arguments: '{"city":"Paris"}' },
+              },
+            ],
+          },
+          { role: "tool", content: "18C", tool_call_id: "fc1" },
+        ],
+        stream: true,
+        requestId: "tools-signature-second",
+        tools: [weatherTool],
+      };
+      for await (const _ of provider.chat(secondRequest)) {
+        // drain
+      }
+
+      const contents = bodies[1].request?.contents ?? [];
+      const modelTurn = contents.find((content) => content.role === "model");
+      // The signature is a sibling of functionCall, not a field inside it.
+      expect(modelTurn?.parts?.[0]).toEqual({
+        functionCall: {
+          name: "get_weather",
+          args: { city: "Paris" },
+          id: "fc1",
+        },
+        thoughtSignature: "SIG-123",
+      });
+    });
+
+    it("rejects a tool result that cannot be matched to a function name", async () => {
+      const { provider } = createCapturingProvider([
+        'data: {"response":{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}}\n\n',
+        "data: [DONE]\n\n",
+      ]);
+
+      const request: NormalizedChatRequest = {
+        model: "gemini-3.8-flash-high",
+        messages: [
+          { role: "user", content: "weather?" },
+          { role: "tool", content: "18C", tool_call_id: "call_unknown" },
+        ],
+        stream: true,
+        requestId: "tools-unmatched",
+        tools: [weatherTool],
+      };
+
+      await expect(async () => {
+        for await (const _ of provider.chat(request)) {
+          // drain
+        }
+      }).rejects.toMatchObject({
+        payload: { code: "invalid_request" },
+      });
+    });
+  });
 });

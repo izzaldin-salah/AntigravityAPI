@@ -149,6 +149,9 @@ Request validation (POST /v1/chat/completions):
 - `temperature` 0..2; `top_p` 0..1; `max_tokens`/`max_completion_tokens` positive
   int (`max_completion_tokens` wins if both); `stop` string|string[] normalized to
   string[]; `tools`/`tool_choice` validated structurally, passed through.
+- Tool messages (`role: "tool"`) must carry `tool_call_id` (or `name`) so the
+  upstream function name can be resolved; otherwise the provider rejects the
+  request with code `invalid_request`.
 - Unknown fields ignored. `n > 1` -> 400 code `unsupported_parameter`.
 - 400 envelope: type `invalid_request_error`, `param` names the offending field.
 
@@ -175,6 +178,29 @@ ProviderEvent -> OpenAI chunk (streaming): `start` -> first chunk; `delta` ->
 `delta:{content}`; `tool_call_delta` -> `delta:{tool_calls:[...]}`; `usage` ->
 recorded (emitted only with include_usage); `done` -> chunk with `finish_reason`
 (map `error`->`stop`) then `[DONE]`; `error` -> error path.
+
+Tool calling (Antigravity provider; live-verified 2026-10-21):
+- `tools` -> one upstream `tools: [{ functionDeclarations: [...] }]` group;
+  parameters are sanitized first (local `$ref`s inlined, keywords the Cloud
+  Code Assist schema proto rejects removed).
+- `tool_choice`: `auto`/unset -> `toolConfig.functionCallingConfig.mode =
+  "VALIDATED"`; `required` and a named function -> mode `"ANY"` (plus
+  `allowedFunctionNames` for the named form) and a forced-tool directive
+  appended to the transcript, because the backend drops `toolConfig` on its
+  Gemini routes; `none` -> the tools are not declared at all, because the
+  backend ignores mode `"NONE"` and still emits calls.
+- assistant `tool_calls` -> upstream `functionCall` parts (name, args, id);
+  `role: "tool"` messages -> `functionResponse` parts (`response.output`) in a
+  single user turn.
+- upstream `functionCall` parts -> `tool_call_delta` events with an incrementing
+  index; a turn that emitted tool calls finishes with `finish_reason:
+  "tool_calls"` (the upstream itself reports `STOP`).
+- the upstream signs every function call with a `thoughtSignature` that must be
+  replayed as a SIBLING of `functionCall` — nesting it inside `functionCall` is
+  rejected ("Unknown name thoughtSignature") and omitting it is rejected
+  ("Function call is missing a thought_signature"). The provider keeps the
+  signature in memory, keyed by tool call id, and replays it with the follow-up
+  request.
 
 Provider error code -> HTTP:
 

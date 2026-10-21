@@ -13,6 +13,13 @@ import type { AntigravityAccountStatus, CredentialStore } from "../types/admin";
 import type { AntigravityCredentials } from "../types/config";
 import { TokenManager } from "./token-manager";
 import { parseSseStream } from "./sse";
+import { randomBytes } from "node:crypto";
+import {
+  buildFunctionResponsePart,
+  collectToolCallNames,
+  planToolCall,
+  type UpstreamFunctionCallPart,
+} from "./tools";
 import type { ModelOption, ModelSelection, ModelSettingsSnapshot, ModelSettingsStore } from "../types/model-settings";
 import { DEFAULT_MODEL_SELECTION, modelOption, publicModel, thinkingConfig, validSelection } from "./model-policy";
 
@@ -59,6 +66,9 @@ export interface AntigravityProviderOptions {
 export class AntigravityProvider implements AIProvider {
   readonly id = "antigravity";
 
+  /** Bounded store of thought signatures for emitted tool calls. */
+  private static readonly MAX_TOOL_SIGNATURES = 200;
+
   private tokenManager: TokenManager;
   private endpoint: string;
   private fetchImpl: typeof fetch;
@@ -66,6 +76,13 @@ export class AntigravityProvider implements AIProvider {
   private settingsStore?: ModelSettingsStore;
   private settingsLoaded?: Promise<void>;
   private settingsWrite: Promise<unknown> = Promise.resolve();
+  /**
+   * Thought signatures of emitted tool calls, keyed by tool call id. Gemini 3
+   * family models reject a replayed function call that lost its signature, so
+   * the signature received with the call is replayed with the follow-up
+   * request. Bounded — only recent calls are kept.
+   */
+  private readonly toolSignatures = new Map<string, string>();
   private usage: UsageInfo = {
     promptTokens: 0,
     completionTokens: 0,
@@ -266,6 +283,8 @@ export class AntigravityProvider implements AIProvider {
     let recordedUsage: UsageInfo | undefined;
     let promptTokens = 0;
     let completionTokens = 0;
+    let toolCallIndex = 0;
+    let toolCallEmitted = false;
 
     const streamId = `chatcmpl-${request.requestId}`;
     const created = Math.floor(Date.now() / 1000);
@@ -309,12 +328,20 @@ export class AntigravityProvider implements AIProvider {
               };
             }
             if (part.functionCall) {
+              const name = part.functionCall.name ?? "";
+              // Antigravity supplies the id when it tracks tool calls itself;
+              // mint one otherwise so the client can correlate the result.
+              const id = part.functionCall.id || this.nextToolCallId();
+              if (part.thoughtSignature) {
+                this.rememberToolSignature(id, part.thoughtSignature);
+              }
+              toolCallEmitted = true;
               yield {
                 type: "tool_call_delta",
-                index: 0,
-                id: part.functionCall.id,
-                name: part.functionCall.name,
-                argumentsDelta: JSON.stringify(part.functionCall.args),
+                index: toolCallIndex++,
+                id,
+                name,
+                argumentsDelta: JSON.stringify(part.functionCall.args ?? {}),
               };
             }
           }
@@ -345,6 +372,12 @@ export class AntigravityProvider implements AIProvider {
         model: effectiveModel,
         created,
       };
+    }
+
+    if (toolCallEmitted && finishReasonRecorded === "stop") {
+      // Gemini reports STOP for a turn that ended in a function call. The
+      // OpenAI contract expects "tool_calls" so clients run their tool loop.
+      finishReasonRecorded = "tool_calls";
     }
 
     if (!recordedUsage) {
@@ -391,31 +424,80 @@ export class AntigravityProvider implements AIProvider {
     const systemMessages = request.messages.filter((m) => m.role === "system");
     const nonSystemMessages = request.messages.filter((m) => m.role !== "system");
 
-    const contents = nonSystemMessages.map((m) => {
-      const role = m.role === "assistant" ? "model" : "user";
-      const parts: Array<Record<string, unknown>> = [];
-      if (m.content) {
-        parts.push({ text: m.content });
-      }
-      if (m.tool_calls) {
-        for (const tc of m.tool_calls) {
-          let argsObj: unknown = {};
-          try {
-            argsObj = typeof tc.function.arguments === "string" ? JSON.parse(tc.function.arguments) : tc.function.arguments;
-          } catch {
-            argsObj = {};
-          }
-          parts.push({
-            functionCall: {
-              name: tc.function.name,
-              args: argsObj,
-              id: tc.id,
-            },
+    const plan = planToolCall({
+      tools: request.tools,
+      toolChoice: request.toolChoice,
+    });
+    const toolCallNames = collectToolCallNames(nonSystemMessages);
+
+    const contents: Array<{
+      role: string;
+      parts: Array<Record<string, unknown>>;
+    }> = [];
+
+    for (const message of nonSystemMessages) {
+      if (message.role === "tool") {
+        const part = buildFunctionResponsePart(message, toolCallNames);
+        if (!part) {
+          throw new ProviderError({
+            code: "invalid_request",
+            message:
+              "A tool result must reference the assistant tool call it answers via tool_call_id, or carry the function name.",
+            status: 400,
           });
         }
+        // Cloud Code Assist requires every function response of a turn to be
+        // merged into a single user turn.
+        const previous = contents[contents.length - 1];
+        if (
+          previous &&
+          previous.role === "user" &&
+          previous.parts.some((entry) => "functionResponse" in entry)
+        ) {
+          previous.parts.push(part);
+        } else {
+          contents.push({ role: "user", parts: [part] });
+        }
+        continue;
       }
-      return { role, parts };
-    });
+
+      const role = message.role === "assistant" ? "model" : "user";
+      const parts: Array<Record<string, unknown>> = [];
+      if (message.content) {
+        parts.push({ text: message.content });
+      }
+      for (const tc of message.tool_calls ?? []) {
+        let argsObj: unknown = {};
+        try {
+          argsObj =
+            typeof tc.function.arguments === "string"
+              ? JSON.parse(tc.function.arguments)
+              : tc.function.arguments;
+        } catch {
+          argsObj = {};
+        }
+        const part: UpstreamFunctionCallPart = {
+          functionCall: {
+            name: tc.function.name,
+            args: (argsObj ?? {}) as Record<string, unknown>,
+            id: tc.id,
+          },
+        };
+        // Replay the signature the upstream sent with the call: Gemini 3
+        // family models reject a function call that lost it. The signature is
+        // a sibling of functionCall, not a field inside it.
+        const signature = this.toolSignatures.get(tc.id);
+        if (signature) {
+          part.thoughtSignature = signature;
+        }
+        parts.push(part);
+      }
+      contents.push({ role, parts });
+    }
+
+    if (plan.forcedDirective) {
+      contents.push({ role: "user", parts: [{ text: plan.forcedDirective }] });
+    }
 
     const systemInstruction =
       systemMessages.length > 0
@@ -438,6 +520,8 @@ export class AntigravityProvider implements AIProvider {
         contents,
         ...(systemInstruction ? { systemInstruction } : {}),
         ...(Object.keys(generationConfig).length > 0 ? { generationConfig } : {}),
+        ...(plan.tools ? { tools: plan.tools } : {}),
+        ...(plan.toolConfig ? { toolConfig: plan.toolConfig } : {}),
         sessionId: `session_${Date.now()}`,
         labels: {
           trajectory_id: `traj_${request.requestId}`,
@@ -448,6 +532,22 @@ export class AntigravityProvider implements AIProvider {
       requestType: "agent",
       requestId: `agent/gw/${Date.now()}/${request.requestId}/1`,
     };
+  }
+
+  /** Mint an OpenAI-shaped tool call id when the upstream did not supply one. */
+  private nextToolCallId(): string {
+    return `call_${randomBytes(8).toString("hex")}`;
+  }
+
+  /** Remember a thought signature so the matching call can be replayed. */
+  private rememberToolSignature(id: string, signature: string): void {
+    if (this.toolSignatures.size >= AntigravityProvider.MAX_TOOL_SIGNATURES) {
+      const oldest = this.toolSignatures.keys().next();
+      if (!oldest.done) {
+        this.toolSignatures.delete(oldest.value);
+      }
+    }
+    this.toolSignatures.set(id, signature);
   }
 
   private handleHttpError(status: number, message?: string): never {

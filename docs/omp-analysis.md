@@ -214,3 +214,41 @@ Because no live Google Antigravity credentials or live cloud environment were av
   - Transition to `true` when a token refresh is rejected (400/401 / `invalid_grant`) with redacted error message.
   - Fail fast on `chat()` without making unauthenticated upstream network calls.
   - Transition to `false` when a refresh succeeds or when new credentials are saved/loaded from the store.
+
+---
+
+## 12. Tool Calling (Function Calling) — Reference & Live Verification
+
+### 12.1 OMP reference (MIT, `can1357/oh-my-pi`)
+
+Files read for the tool path on 2026-10-21 (branch `HEAD`):
+- `packages/ai/src/providers/google-gemini-cli.ts` — `normalizeAntigravityTools`, the `toolConfig` mode logic, the forced-tool directive, and the `functionCall` -> tool call conversion with its `thoughtSignature` handling.
+- `packages/ai/src/providers/google-shared.ts` — `functionResponse` construction (tool result -> part), `nextToolCallId`, `mapToolChoice`, and the stop-reason override for turns that contain tool calls.
+- `packages/ai/src/providers/google-antigravity-forced-tool.md` — the forced-tool directive text.
+- `packages/ai/src/utils/schema/fields.ts` — `CCA_UNSUPPORTED_SCHEMA_FIELDS`, the keywords the Cloud Code Assist schema proto rejects.
+- `packages/ai/src/providers/transform-messages.ts` — contains no `functionCall` handling; the request-side tool-call part is built in `google-shared.ts`.
+
+Upstream facts taken from OMP:
+1. Tools are declared as one group: `tools: [{ functionDeclarations: [...] }]`.
+2. `toolConfig.functionCallingConfig.mode` is one of `AUTO | ANY | NONE | VALIDATED`; Antigravity's default tool mode is `VALIDATED` (an explicit non-auto choice wins over it).
+3. Cloud Code Assist **drops** `toolConfig` on Antigravity's Gemini routes — the backend answers in text under `mode: "ANY"` and still emits calls under `"NONE"`. OMP therefore restates a forced choice in the transcript (a directive text part) and forces `VALIDATED` when no choice was requested.
+4. A tool result becomes a `functionResponse` part in a `user` turn; all function responses of a turn must be merged into one user turn; the payload is `{ output: <text> }` (or `{ error: <text> }`).
+5. A function call is replayed with its upstream `id` and its `thoughtSignature`.
+6. A `STOP` / `MAX_TOKENS` finish reason is upgraded to a tool-call stop reason when the turn contains tool calls.
+
+### 12.2 Live verification against the real Antigravity backend (2026-10-21)
+
+Verified with the connected personal account through this gateway (`gemini-3.8-flash-tiered`):
+- A request carrying one `get_weather` function produced a real upstream `functionCall`. The gateway returned `message.tool_calls[0]` with `finish_reason: "tool_calls"`, and the streaming path emitted `delta.tool_calls[]` (id, type, function.name, function.arguments).
+- The follow-up turn (assistant `tool_calls` plus a `role: "tool"` result) completed and produced the final answer — the tool loop works end to end.
+- **Thought signature rules (verbatim upstream errors):**
+  - Missing signature -> 400 "Function call is missing a thought_signature in functionCall parts. This is required for tools to work correctly, and missing thought_signature may lead to degraded model performance."
+  - Signature nested inside `functionCall` -> 400 "Unknown name \"thoughtSignature\" at 'request.contents[1].parts[0].function_call': Cannot find field." The signature must be a **sibling** of `functionCall` (`{ thoughtSignature, functionCall }`).
+- `role: "function"` for the tool-result turn -> 400 "Role 'function' is not supported. Please use a valid role: SYSTEM, SYSTEM_1, USER, ASSISTANT, DEVELOPER, CONTEXT, USER_CONTEXT, MODEL, USER." The result turn must use role `user`.
+- `functionResponse.response` accepts `{ output: ... }` and `{ result: ... }`; an `id` on the function response is accepted but not required.
+- `tool_choice: "required"` produced a tool call (via the forced-tool directive); `tool_choice: "none"` produced a plain text answer with no tool call, because the tools are not declared at all.
+
+### 12.3 Implementation in this gateway
+- `src/providers/tools.ts` — pure mapping helpers: schema sanitizing, declaration mapping, tool-choice planning, tool-result mapping.
+- `src/providers/antigravity.ts` — request building (`tools` / `toolConfig` / directive / `functionCall` / `functionResponse`), response parsing (`tool_call_delta` with an incrementing index, `finish_reason: "tool_calls"`), and the in-memory thought-signature store used to replay signatures with the follow-up request.
+- `tests/providers/tools.test.ts` and `tests/providers/antigravity.test.ts` — 23 new tests covering schema sanitizing, mode planning, result merging, signature replay and the unmatched-tool-result rejection.

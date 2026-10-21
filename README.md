@@ -95,9 +95,64 @@ More: [`tests/api/EXAMPLES.md`](tests/api/EXAMPLES.md).
 | --- | --- | --- | --- |
 | GET | `/health` | public | lightweight, no provider calls |
 | GET | `/v1/models` | ✅ | OpenAI list format |
-| POST | `/v1/chat/completions` | ✅ | streaming + non-streaming |
+| POST | `/v1/chat/completions` | ✅ | streaming + non-streaming, tool calling |
 | GET | `/usage` | ✅ | local counters + provider usage |
 | GET/POST | `/admin*` | session | account dashboard (own login, CSRF, rate limiting) |
+
+### Tool calling (function calling)
+
+`POST /v1/chat/completions` accepts the standard OpenAI tool fields and
+exchanges them with the Antigravity backend:
+
+```bash
+curl http://localhost:3000/v1/chat/completions \
+  -H "Authorization: Bearer dev-local-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-3.8-flash-high",
+    "messages": [{"role": "user", "content": "Weather in Paris?"}],
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get the current weather for a city",
+        "parameters": {
+          "type": "object",
+          "properties": {"city": {"type": "string"}},
+          "required": ["city"]
+        }
+      }
+    }]
+  }'
+```
+
+The model answers with a normal OpenAI tool call — `message.tool_calls[]` with
+`finish_reason: "tool_calls"` (streaming emits `delta.tool_calls[]` chunks).
+Send the result back as a `role: "tool"` message carrying the same
+`tool_call_id`, and the model produces the final answer.
+
+What the gateway does for you:
+
+- **Wire mapping** — `tools` become the upstream `functionDeclarations` group;
+  JSON Schemas are cleaned of the keywords the Cloud Code Assist schema proto
+  rejects (and local `$ref`s are inlined), so strict schemas from real clients
+  are accepted.
+- **`tool_choice`** — `auto`/unset uses the backend's default `VALIDATED` mode;
+  `required` and a named function use `ANY` plus a transcript directive (the
+  backend drops `toolConfig` on its Gemini routes, so a forced choice has to be
+  restated in the conversation); `none` does not declare the tools at all,
+  because the backend ignores `NONE` and would still call them.
+- **Tool results** — mapped to upstream `functionResponse` parts in a single
+  user turn, which is what the backend requires.
+- **Thought signatures** — the backend signs each function call and rejects a
+  replayed call whose signature is missing, so the gateway keeps the signature
+  with the call and replays it with your follow-up request.
+
+Limits worth knowing: the signature is held in memory for the lifetime of the
+process, so a tool loop that spans a gateway restart is rejected by the
+backend (re-issue the call). Tool calls are forwarded for the active model
+only; a model without tool support is not advertised in the dashboard model
+list. The unofficial Antigravity path remains experimental.
 
 ## Account dashboard (`/admin`)
 
