@@ -49,12 +49,49 @@ export interface ToolDefinition {
   };
 }
 
+/**
+ * An image inside a multimodal message.
+ *
+ * `data` holds a base64 payload (no `data:` prefix) when the client sent a
+ * data URL; `url` holds an absolute http(s) URL when the client sent a
+ * remote image. The upstream accepts both shapes: base64 becomes
+ * `inlineData`, a remote URL becomes `fileData` — the gateway never fetches
+ * a client-supplied URL itself.
+ */
+export interface ImagePart {
+  type: "image";
+  mimeType: string;
+  data?: string;
+  url?: string;
+}
+
+export type MessagePart = { type: "text"; text: string } | ImagePart;
+
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
+  /** Text content of the message (text parts joined). */
   content: string | null;
   name?: string;
   tool_call_id?: string;
   tool_calls?: ToolCall[];
+  /**
+   * v1.2 additive: multimodal parts. Present when the message carried
+   * non-text content (images). `content` stays the text-only view so text
+   * consumers keep working.
+   */
+  parts?: MessagePart[];
+}
+
+/**
+ * Structured output request. `json_object` asks for JSON only;
+ * `json_schema` additionally pins the shape with a JSON Schema.
+ */
+export interface ResponseFormat {
+  type: "json_object" | "json_schema";
+  /** JSON Schema for `json_schema` requests. */
+  schema?: Record<string, unknown>;
+  /** Optional name of the schema (informational). */
+  name?: string;
 }
 
 export type FinishReason =
@@ -82,6 +119,11 @@ export interface NormalizedChatRequest {
     | "none"
     | "required"
     | { type: "function"; function: { name: string } };
+  /**
+   * v1.2 additive: structured output request. Mapped to the upstream
+   * `responseMimeType` / `responseSchema` generation settings.
+   */
+  responseFormat?: ResponseFormat;
   user?: string;
 }
 

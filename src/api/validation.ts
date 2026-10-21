@@ -1,7 +1,10 @@
 import { OpenAIHttpError } from "../core/errors";
 import type {
   ChatMessage,
+  ImagePart,
+  MessagePart,
   NormalizedChatRequest,
+  ResponseFormat,
   ToolCall,
   ToolDefinition,
 } from "../types/provider";
@@ -11,51 +14,146 @@ export interface ValidatedChatRequest {
   streamOptions?: { include_usage?: boolean };
 }
 
+/** Maximum decoded size of a single inline image. */
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+
+/** Image mime types guessed from a file extension. */
+const MIME_BY_EXTENSION: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  bmp: "image/bmp",
+  heic: "image/heic",
+  heif: "image/heif",
+  avif: "image/avif",
+  tif: "image/tiff",
+  tiff: "image/tiff",
+  svg: "image/svg+xml",
+};
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function contentError(message: string): OpenAIHttpError {
+  return new OpenAIHttpError(400, message, "invalid_request_error", "messages");
+}
+
 /**
- * Flatten OpenAI-style content parts into plain text.
+ * Parse an OpenAI `image_url` value into an image part.
  *
- * Clients such as 5ire and Cline send `content` as an array of parts
- * (`[{type:"text",text:"..."}]`) instead of a bare string. The Antigravity
- * upstream is text-only, so text parts are concatenated and image/audio
- * parts are rejected with a clear error instead of being silently dropped.
+ * A `data:` URL becomes a base64 payload (sent upstream as `inlineData`);
+ * an http(s) URL is forwarded as-is (sent upstream as `fileData`) — the
+ * gateway never fetches a client-supplied URL itself, so it cannot be used
+ * to reach internal network addresses.
  */
-function flattenContentParts(parts: unknown[], index: number): string {
+function parseImagePart(url: string, index: number): ImagePart {
+  if (url.length > 8192) {
+    throw contentError(
+      `Image URL at message index ${index} is too long (maximum 8192 characters).`,
+    );
+  }
+  if (url.startsWith("data:")) {
+    const match = /^data:([^;,]+)(;base64)?,([\s\S]*)$/.exec(url);
+    if (!match || !match[2]) {
+      throw contentError(
+        `Image at message index ${index} must be a base64 data URL (data:image/png;base64,...).`,
+      );
+    }
+    const mimeType = match[1].toLowerCase();
+    if (!mimeType.startsWith("image/")) {
+      throw contentError(
+        `Image at message index ${index} has mime type '${mimeType}'. Only image data URLs are supported.`,
+      );
+    }
+    const data = match[3].replace(/\s+/g, "");
+    const bytes = Math.floor((data.length * 3) / 4);
+    if (bytes > MAX_IMAGE_BYTES) {
+      throw contentError(
+        `Image at message index ${index} is ${bytes} bytes, above the ${MAX_IMAGE_BYTES} byte limit.`,
+      );
+    }
+    return { type: "image", mimeType, data };
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw contentError(
+      `Image at message index ${index} is not a valid URL. Use an http(s) URL or a base64 data URL.`,
+    );
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw contentError(
+      `Image at message index ${index} uses the unsupported scheme '${parsed.protocol}'. Use http(s) or a base64 data URL.`,
+    );
+  }
+  const extension = parsed.pathname.split(".").pop()?.toLowerCase() ?? "";
+  return {
+    type: "image",
+    mimeType: MIME_BY_EXTENSION[extension] ?? "",
+    url: parsed.toString(),
+  };
+}
+
+/**
+ * Parse OpenAI-style content parts.
+ *
+ * Text parts are joined into the message text; image parts are kept as
+ * multimodal parts. Audio and unknown part types are rejected with a clear
+ * error instead of being silently dropped.
+ */
+function parseContentParts(
+  parts: unknown[],
+  index: number,
+): { text: string; parts: MessagePart[] } {
   const texts: string[] = [];
+  const messageParts: MessagePart[] = [];
   for (const part of parts) {
     if (typeof part === "string") {
       texts.push(part);
+      messageParts.push({ type: "text", text: part });
       continue;
     }
-    if (!part || typeof part !== "object" || Array.isArray(part)) {
-      throw new OpenAIHttpError(
-        400,
+    if (!isPlainObject(part)) {
+      throw contentError(
         `Message content at index ${index} contains an invalid content part.`,
-        "invalid_request_error",
-        "messages",
       );
     }
-    const typed = part as { type?: unknown; text?: unknown };
-    const type = typeof typed.type === "string" ? typed.type : "";
-    if ((type === "text" || type === "input_text") && typeof typed.text === "string") {
-      texts.push(typed.text);
+    const type = typeof part.type === "string" ? part.type : "";
+    if ((type === "text" || type === "input_text") && typeof part.text === "string") {
+      texts.push(part.text);
+      messageParts.push({ type: "text", text: part.text });
       continue;
     }
-    if (type === "image_url" || type === "input_audio" || type === "audio") {
-      throw new OpenAIHttpError(
-        400,
-        `Message content at index ${index} contains a '${type}' part. This gateway forwards text only — image and audio input are not supported.`,
-        "invalid_request_error",
-        "messages",
+    if (type === "image_url") {
+      const raw = part.image_url;
+      const url =
+        typeof raw === "string"
+          ? raw
+          : isPlainObject(raw) && typeof raw.url === "string"
+            ? raw.url
+            : "";
+      if (!url) {
+        throw contentError(
+          `Image part at message index ${index} must carry an 'image_url' with a url.`,
+        );
+      }
+      messageParts.push(parseImagePart(url, index));
+      continue;
+    }
+    if (type === "input_audio" || type === "audio") {
+      throw contentError(
+        `Message content at index ${index} contains a '${type}' part. This gateway supports text and images — audio input is not supported.`,
       );
     }
-    throw new OpenAIHttpError(
-      400,
+    throw contentError(
       `Message content at index ${index} contains an unsupported content part type '${type}'.`,
-      "invalid_request_error",
-      "messages",
     );
   }
-  return texts.join("");
+  return { text: texts.join(""), parts: messageParts };
 }
 
 export function validateAndNormalizeChatRequest(
@@ -130,11 +228,18 @@ export function validateAndNormalizeChatRequest(
     const role: ChatMessage["role"] = rawRole === "developer" ? "system" : rawRole;
 
     let content: string | null = null;
+    let messageParts: MessagePart[] | undefined;
     if (m.content !== undefined && m.content !== null) {
       if (typeof m.content === "string") {
         content = m.content;
       } else if (Array.isArray(m.content)) {
-        content = flattenContentParts(m.content, i);
+        const parsed = parseContentParts(m.content, i);
+        content = parsed.text;
+        // Multimodal parts are attached only when the message carries an
+        // image; text-only messages keep the plain-text path.
+        if (parsed.parts.some((part) => part.type === "image")) {
+          messageParts = parsed.parts;
+        }
       } else {
         throw new OpenAIHttpError(
           400,
@@ -149,6 +254,10 @@ export function validateAndNormalizeChatRequest(
       role,
       content,
     };
+
+    if (messageParts) {
+      chatMsg.parts = messageParts;
+    }
 
     if (typeof m.name === "string") {
       chatMsg.name = m.name;
@@ -369,7 +478,55 @@ export function validateAndNormalizeChatRequest(
     }
   }
 
-  // 10. n > 1 -> 400 code unsupported_parameter
+  // 10. response_format structural validation
+  let responseFormat: ResponseFormat | undefined;
+  if (b.response_format !== undefined && b.response_format !== null) {
+    const raw = b.response_format;
+    if (!isPlainObject(raw)) {
+      throw new OpenAIHttpError(
+        400,
+        "The 'response_format' parameter must be an object.",
+        "invalid_request_error",
+        "response_format",
+      );
+    }
+    if (raw.type === "json_object") {
+      responseFormat = { type: "json_object" };
+    } else if (raw.type === "json_schema") {
+      const jsonSchema = raw.json_schema;
+      if (!isPlainObject(jsonSchema)) {
+        throw new OpenAIHttpError(
+          400,
+          "The 'response_format.json_schema' parameter must be an object with a 'schema'.",
+          "invalid_request_error",
+          "response_format",
+        );
+      }
+      const schema = jsonSchema.schema;
+      if (!isPlainObject(schema)) {
+        throw new OpenAIHttpError(
+          400,
+          "The 'response_format.json_schema.schema' parameter must be a JSON Schema object.",
+          "invalid_request_error",
+          "response_format",
+        );
+      }
+      responseFormat = {
+        type: "json_schema",
+        schema: schema as Record<string, unknown>,
+        name: typeof jsonSchema.name === "string" ? jsonSchema.name : undefined,
+      };
+    } else {
+      throw new OpenAIHttpError(
+        400,
+        "The 'response_format.type' parameter must be 'json_object' or 'json_schema'.",
+        "invalid_request_error",
+        "response_format",
+      );
+    }
+  }
+
+  // 11. n > 1 -> 400 code unsupported_parameter
   if (b.n !== undefined && b.n !== null) {
     if (typeof b.n !== "number" || b.n > 1) {
       throw new OpenAIHttpError(
@@ -410,6 +567,7 @@ export function validateAndNormalizeChatRequest(
     stop,
     tools,
     toolChoice,
+    responseFormat,
     user,
   };
 

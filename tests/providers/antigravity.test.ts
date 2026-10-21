@@ -721,4 +721,179 @@ describe("AntigravityProvider", () => {
       });
     });
   });
+
+  describe("multimodal and structured output", () => {
+    interface UpstreamBody {
+      request?: {
+        contents?: Array<{
+          role: string;
+          parts?: Array<Record<string, unknown>>;
+        }>;
+        generationConfig?: Record<string, unknown>;
+      };
+    }
+
+    function createCapturingProvider(sseLines: string[]) {
+      let body: UpstreamBody = {};
+      const fakeFetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        body = JSON.parse(String(init?.body)) as UpstreamBody;
+        return new Response(createSseStream(sseLines), {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      }) as unknown as typeof fetch;
+      const provider = new AntigravityProvider(
+        { accessToken: "test-token", projectId: "test-proj" },
+        { fetch: fakeFetch },
+      );
+      return { provider, readBody: () => body };
+    }
+
+    const sse = [
+      'data: {"response":{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}}\n\n',
+      "data: [DONE]\n\n",
+    ];
+
+    it("sends a base64 image as inlineData", async () => {
+      const { provider, readBody } = createCapturingProvider(sse);
+
+      const request: NormalizedChatRequest = {
+        model: "gemini-3.8-flash-high",
+        messages: [
+          {
+            role: "user",
+            content: "what is in this image?",
+            parts: [
+              { type: "text", text: "what is in this image?" },
+              { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
+            ],
+          },
+        ],
+        stream: true,
+        requestId: "image-inline",
+      };
+
+      for await (const _ of provider.chat(request)) {
+        // drain
+      }
+
+      const contents = readBody().request?.contents ?? [];
+      expect(contents[0]).toEqual({
+        role: "user",
+        parts: [
+          { text: "what is in this image?" },
+          { inlineData: { mimeType: "image/png", data: "aGVsbG8=" } },
+        ],
+      });
+    });
+
+    it("sends a remote image as fileData without fetching it", async () => {
+      const { provider, readBody } = createCapturingProvider(sse);
+
+      const request: NormalizedChatRequest = {
+        model: "gemini-3.8-flash-high",
+        messages: [
+          {
+            role: "user",
+            content: "describe",
+            parts: [
+              { type: "text", text: "describe" },
+              {
+                type: "image",
+                mimeType: "image/png",
+                url: "https://example.com/logo.png",
+              },
+            ],
+          },
+        ],
+        stream: true,
+        requestId: "image-remote",
+      };
+
+      for await (const _ of provider.chat(request)) {
+        // drain
+      }
+
+      const contents = readBody().request?.contents ?? [];
+      expect(contents[0]?.parts?.[1]).toEqual({
+        fileData: { fileUri: "https://example.com/logo.png", mimeType: "image/png" },
+      });
+    });
+
+    it("maps response_format json_object to the upstream mime type", async () => {
+      const { provider, readBody } = createCapturingProvider(sse);
+
+      const request: NormalizedChatRequest = {
+        model: "gemini-3.8-flash-high",
+        messages: [{ role: "user", content: "json please" }],
+        stream: true,
+        requestId: "response-json-object",
+        responseFormat: { type: "json_object" },
+      };
+
+      for await (const _ of provider.chat(request)) {
+        // drain
+      }
+
+      expect(readBody().request?.generationConfig?.responseMimeType).toBe(
+        "application/json",
+      );
+      expect(readBody().request?.generationConfig?.responseSchema).toBeUndefined();
+    });
+
+    it("maps response_format json_schema to an enforced upstream schema", async () => {
+      const { provider, readBody } = createCapturingProvider(sse);
+
+      const request: NormalizedChatRequest = {
+        model: "gemini-3.8-flash-high",
+        messages: [{ role: "user", content: "capital of France" }],
+        stream: true,
+        requestId: "response-json-schema",
+        responseFormat: {
+          type: "json_schema",
+          name: "city",
+          schema: {
+            type: "object",
+            properties: { capital: { type: "string" } },
+            required: ["capital"],
+          },
+        },
+      };
+
+      for await (const _ of provider.chat(request)) {
+        // drain
+      }
+
+      const generationConfig = readBody().request?.generationConfig ?? {};
+      expect(generationConfig.responseMimeType).toBe("application/json");
+      expect(generationConfig.responseSchema).toEqual({
+        type: "OBJECT",
+        properties: { capital: { type: "STRING" } },
+        required: ["capital"],
+      });
+    });
+
+    it("rejects a response schema the provider cannot express", async () => {
+      const { provider } = createCapturingProvider(sse);
+
+      const request: NormalizedChatRequest = {
+        model: "gemini-3.8-flash-high",
+        messages: [{ role: "user", content: "json please" }],
+        stream: true,
+        requestId: "response-bad-schema",
+        responseFormat: {
+          type: "json_schema",
+          schema: { type: "date" },
+        },
+      };
+
+      await expect(async () => {
+        for await (const _ of provider.chat(request)) {
+          // drain
+        }
+      }).rejects.toMatchObject({
+        payload: { code: "invalid_request" },
+      });
+    });
+  });
 });

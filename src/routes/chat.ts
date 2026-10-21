@@ -12,6 +12,10 @@ import {
   mapProviderErrorToHttp,
 } from "../core/errors";
 import { generateChatCompletionId } from "../core/id";
+import {
+  createJsonFenceFilter,
+  stripJsonFence,
+} from "../core/json-fence";
 import type { UsageTracker } from "../core/usage-tracker";
 import type {
   OpenAIChatCompletionResponse,
@@ -167,6 +171,12 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (
           .sort(([a], [b]) => a - b)
           .map(([, tc]) => tc);
 
+        // JSON mode must return raw JSON: the upstream sometimes wraps the
+        // payload in a Markdown fence, which would break JSON.parse().
+        const finalContent = normalized.responseFormat
+          ? stripJsonFence(accumulatedContent)
+          : accumulatedContent;
+
         const response: OpenAIChatCompletionResponse = {
           id: completionId,
           object: "chat.completion",
@@ -177,7 +187,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (
               index: 0,
               message: {
                 role: "assistant",
-                content: accumulatedContent.length > 0 ? accumulatedContent : null,
+                content: finalContent.length > 0 ? finalContent : null,
                 tool_calls: toolCallsList.length > 0 ? toolCallsList : undefined,
               },
               finish_reason: finishReason,
@@ -227,6 +237,10 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (
     let providerUsage: UsageInfo | undefined;
     let finishReason: FinishReason = "stop";
     let completedNormally = false;
+    // JSON mode: strip a Markdown fence the upstream may add around the payload.
+    const fenceFilter = normalized.responseFormat
+      ? createJsonFenceFilter()
+      : undefined;
 
     try {
       for await (const event of opts.provider.chat(normalized)) {
@@ -252,10 +266,13 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (
             writeSseFrame(createRoleChunk(streamId, streamModel, streamCreated));
             roleChunkSent = true;
           }
-          accumulatedText += event.text;
-          writeSseFrame(
-            createContentChunk(streamId, streamModel, streamCreated, event.text),
-          );
+          const text = fenceFilter ? fenceFilter.push(event.text) : event.text;
+          accumulatedText += text;
+          if (text) {
+            writeSseFrame(
+              createContentChunk(streamId, streamModel, streamCreated, text),
+            );
+          }
         } else if (event.type === "tool_call_delta") {
           if (!roleChunkSent) {
             writeSseFrame(createRoleChunk(streamId, streamModel, streamCreated));
@@ -275,6 +292,14 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (
         } else if (event.type === "usage") {
           providerUsage = event.usage;
         } else if (event.type === "done") {
+          // Flush anything the JSON fence filter still holds back.
+          const tail = fenceFilter ? fenceFilter.finish() : "";
+          if (tail) {
+            accumulatedText += tail;
+            writeSseFrame(
+              createContentChunk(streamId, streamModel, streamCreated, tail),
+            );
+          }
           finishReason = event.finishReason === "error" ? "stop" : event.finishReason;
           if (event.usage) {
             providerUsage = event.usage;

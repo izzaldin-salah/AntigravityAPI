@@ -20,6 +20,10 @@ import {
   planToolCall,
   type UpstreamFunctionCallPart,
 } from "./tools";
+import {
+  ResponseSchemaError,
+  toGeminiSchema,
+} from "./json-schema";
 import type { ModelOption, ModelSelection, ModelSettingsSnapshot, ModelSettingsStore } from "../types/model-settings";
 import { DEFAULT_MODEL_SELECTION, modelOption, publicModel, thinkingConfig, validSelection } from "./model-policy";
 
@@ -463,7 +467,31 @@ export class AntigravityProvider implements AIProvider {
 
       const role = message.role === "assistant" ? "model" : "user";
       const parts: Array<Record<string, unknown>> = [];
-      if (message.content) {
+      if (message.parts?.length) {
+        // Multimodal message: text parts plus images. A base64 image becomes
+        // `inlineData`; a remote URL becomes `fileData` and is fetched by the
+        // upstream, never by this gateway.
+        for (const part of message.parts) {
+          if (part.type === "text") {
+            if (part.text) parts.push({ text: part.text });
+            continue;
+          }
+          if (part.data) {
+            parts.push({
+              inlineData: { mimeType: part.mimeType, data: part.data },
+            });
+            continue;
+          }
+          if (part.url) {
+            parts.push({
+              fileData: {
+                fileUri: part.url,
+                ...(part.mimeType ? { mimeType: part.mimeType } : {}),
+              },
+            });
+          }
+        }
+      } else if (message.content) {
         parts.push({ text: message.content });
       }
       for (const tc of message.tool_calls ?? []) {
@@ -510,6 +538,27 @@ export class AntigravityProvider implements AIProvider {
     const generationConfig: Record<string, unknown> = thinkingConfig(selection, request.maxTokens);
     if (request.temperature !== undefined) generationConfig.temperature = request.temperature;
     if (request.topP !== undefined) generationConfig.topP = request.topP;
+    if (request.responseFormat) {
+      // Structured output: the upstream enforces the shape through
+      // `responseMimeType` + `responseSchema`.
+      generationConfig.responseMimeType = "application/json";
+      if (request.responseFormat.type === "json_schema" && request.responseFormat.schema) {
+        try {
+          generationConfig.responseSchema = toGeminiSchema(
+            request.responseFormat.schema,
+          );
+        } catch (error) {
+          throw new ProviderError({
+            code: "invalid_request",
+            message:
+              error instanceof ResponseSchemaError
+                ? error.message
+                : "The response_format schema could not be converted for the provider.",
+            status: 400,
+          });
+        }
+      }
+    }
 
     const projectId = this.tokenManager.getProjectId() || "default";
 

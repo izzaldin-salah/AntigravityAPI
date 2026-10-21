@@ -252,3 +252,40 @@ Verified with the connected personal account through this gateway (`gemini-3.8-f
 - `src/providers/tools.ts` — pure mapping helpers: schema sanitizing, declaration mapping, tool-choice planning, tool-result mapping.
 - `src/providers/antigravity.ts` — request building (`tools` / `toolConfig` / directive / `functionCall` / `functionResponse`), response parsing (`tool_call_delta` with an incrementing index, `finish_reason: "tool_calls"`), and the in-memory thought-signature store used to replay signatures with the follow-up request.
 - `tests/providers/tools.test.ts` and `tests/providers/antigravity.test.ts` — 23 new tests covering schema sanitizing, mode planning, result merging, signature replay and the unmatched-tool-result rejection.
+
+---
+
+## 13. Vision and Structured Output — Live Verification (2026-10-22)
+
+Probed directly against the real Antigravity backend (`gemini-3.8-flash-tiered`):
+
+| Upstream request | Result |
+| --- | --- |
+| `parts: [{ inlineData: { mimeType, data } }]` (base64 PNG) | **200** — the model read the image ("This is the official logo of Google.") |
+| `parts: [{ fileData: { fileUri: "https://…", mimeType } }]` | **200** — the model read the image; the upstream fetches remote URLs itself, so the gateway never has to (and must not) fetch a client-supplied URL |
+| `generationConfig.responseMimeType: "application/json"` | **200** — JSON output, but sometimes wrapped in a ` ```json ` fence |
+| `generationConfig.responseSchema` with **UPPERCASE** types | **200** — the schema is **enforced** (`{"capital":"Paris","country":" France"}`) |
+| `generationConfig.responseSchema` with **lowercase** types | **200** but the schema is **silently ignored** (the answer did not follow the shape) |
+
+Consequences implemented in this gateway:
+- JSON schemas are translated to the provider's dialect (uppercase type names,
+  fields outside the schema proto dropped, local `$ref`s inlined, `const` as a
+  single-value `enum`, at most 5 levels of nesting) — otherwise the schema is
+  accepted but ignored.
+- a Markdown fence around the payload is stripped in JSON mode (both
+  non-streaming and streaming), so `JSON.parse(message.content)` behaves like
+  OpenAI's API.
+- HIGH thinking and structured output coexist: with `thinkingLevel: "HIGH"`
+  and a `responseSchema` the request succeeds and the visible output is the
+  schema-shaped JSON (thinking parts are filtered out by the provider layer).
+
+Implementation:
+- `src/providers/json-schema.ts` — `sanitizeSchemaForCca` (tool declarations)
+  and `toGeminiSchema` (structured output).
+- `src/api/validation.ts` — image content parts (data URL / http(s) URL,
+  8 MB per image) and `response_format` validation.
+- `src/providers/antigravity.ts` — `inlineData` / `fileData` parts and
+  `responseMimeType` / `responseSchema` generation settings.
+- `src/core/json-fence.ts` — fence stripping for JSON mode.
+- `tests/providers/json-schema.test.ts`, `tests/api/json-fence.test.ts` and
+  additions to `tests/providers/antigravity.test.ts` / `tests/api/api.test.ts`.

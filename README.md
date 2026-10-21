@@ -154,6 +154,56 @@ backend (re-issue the call). Tool calls are forwarded for the active model
 only; a model without tool support is not advertised in the dashboard model
 list. The unofficial Antigravity path remains experimental.
 
+### Vision (image input)
+
+OpenAI-style image parts are forwarded to the provider, so screenshot-driven
+agents work:
+
+```json
+{
+  "model": "gemini-3.8-flash-high",
+  "messages": [{
+    "role": "user",
+    "content": [
+      { "type": "text", "text": "What logo is this?" },
+      { "type": "image_url", "image_url": { "url": "data:image/png;base64,iVBORw0…" } }
+    ]
+  }]
+}
+```
+
+- a **base64 data URL** is sent as an inline image payload;
+- an **http(s) URL** is passed through for the provider to fetch — the gateway
+  never fetches a client-supplied URL itself, so it cannot be used to reach
+  internal network addresses;
+- limits: 8 MB per image, 25 MB per request;
+- audio input is not supported and is rejected with a clear error.
+
+### Structured output (`response_format`)
+
+```json
+{ "response_format": { "type": "json_object" } }
+```
+
+```json
+{
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "city",
+      "schema": { "type": "object", "properties": { "capital": { "type": "string" } }, "required": ["capital"] }
+    }
+  }
+}
+```
+
+`json_object` asks for JSON only; `json_schema` additionally pins the shape —
+the schema is translated to the provider's schema dialect (type names
+uppercased, unsupported keywords dropped, local `$ref`s inlined, at most 5
+levels of nesting). The provider sometimes wraps the payload in a Markdown
+fence; the gateway strips it, so `JSON.parse(message.content)` works exactly
+like OpenAI's API.
+
 ## Account dashboard (`/admin`)
 
 A minimal, password-protected dashboard for managing the Antigravity account

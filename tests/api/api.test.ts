@@ -211,10 +211,18 @@ describe("personal-antigravity-api API endpoints", () => {
     await app.close();
   });
 
-  it("POST /v1/chat/completions rejects image content parts with a clear error", async () => {
-    const provider = new MockTestProvider();
-    const app = await buildApp({ config: testConfig, provider });
+  it("POST /v1/chat/completions forwards image content parts to the provider", async () => {
+    let seenParts: unknown;
+    const provider = new MockTestProvider({
+      chatHandler: async function* (req) {
+        seenParts = req.messages[0]?.parts;
+        yield { type: "start", id: "chat-image", model: "model", created: 1000 };
+        yield { type: "delta", text: "a logo" };
+        yield { type: "done", finishReason: "stop" };
+      },
+    });
 
+    const app = await buildApp({ config: testConfig, provider });
     const res = await app.inject({
       method: "POST",
       url: "/v1/chat/completions",
@@ -225,15 +233,154 @@ describe("personal-antigravity-api API endpoints", () => {
             role: "user",
             content: [
               { type: "text", text: "what is this?" },
-              { type: "image_url", image_url: { url: "https://example.com/a.png" } },
+              {
+                type: "image_url",
+                image_url: { url: "data:image/png;base64,aGVsbG8=" },
+              },
+              {
+                type: "image_url",
+                image_url: { url: "https://example.com/photo.jpg" },
+              },
             ],
           },
         ],
       },
     });
 
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error.message).toContain("text only");
+    expect(res.statusCode).toBe(200);
+    expect(seenParts).toEqual([
+      { type: "text", text: "what is this?" },
+      { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
+      { type: "image", mimeType: "image/jpeg", url: "https://example.com/photo.jpg" },
+    ]);
+
+    await app.close();
+  });
+
+  it("POST /v1/chat/completions rejects audio content parts and unsupported image schemes", async () => {
+    const provider = new MockTestProvider();
+    const app = await buildApp({ config: testConfig, provider });
+
+    const audioRes = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: {
+        model: "model",
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "input_audio", input_audio: { data: "AAAA" } }],
+          },
+        ],
+      },
+    });
+    expect(audioRes.statusCode).toBe(400);
+    expect(audioRes.json().error.message).toContain("audio");
+
+    const schemeRes = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: {
+        model: "model",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "image_url", image_url: { url: "file:///etc/passwd" } },
+            ],
+          },
+        ],
+      },
+    });
+    expect(schemeRes.statusCode).toBe(400);
+    expect(schemeRes.json().error.message).toContain("scheme");
+
+    await app.close();
+  });
+
+  it("POST /v1/chat/completions passes response_format through to the provider", async () => {
+    let seenFormat: unknown;
+    const provider = new MockTestProvider({
+      chatHandler: async function* (req) {
+        seenFormat = req.responseFormat;
+        yield { type: "start", id: "chat-json", model: "model", created: 1000 };
+        yield { type: "delta", text: '{"capital":"Paris"}' };
+        yield { type: "done", finishReason: "stop" };
+      },
+    });
+
+    const app = await buildApp({ config: testConfig, provider });
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: {
+        model: "model",
+        messages: [{ role: "user", content: "capital of France" }],
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            name: "city",
+            schema: {
+              type: "object",
+              properties: { capital: { type: "string" } },
+              required: ["capital"],
+            },
+          },
+        },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(seenFormat).toEqual({
+      type: "json_schema",
+      name: "city",
+      schema: {
+        type: "object",
+        properties: { capital: { type: "string" } },
+        required: ["capital"],
+      },
+    });
+
+    const badRes = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: {
+        model: "model",
+        messages: [{ role: "user", content: "hi" }],
+        response_format: { type: "yaml" },
+      },
+    });
+    expect(badRes.statusCode).toBe(400);
+    expect(badRes.json().error.param).toBe("response_format");
+
+    await app.close();
+  });
+
+  it("POST /v1/chat/completions returns raw JSON in json_object mode", async () => {
+    const provider = new MockTestProvider({
+      chatHandler: async function* () {
+        yield { type: "start", id: "chat-fence", model: "model", created: 1000 };
+        yield { type: "delta", text: "```json\n" };
+        yield { type: "delta", text: '{"capital":"Paris"}' };
+        yield { type: "delta", text: "\n```" };
+        yield { type: "done", finishReason: "stop" };
+      },
+    });
+
+    const app = await buildApp({ config: testConfig, provider });
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: {
+        model: "model",
+        messages: [{ role: "user", content: "capital of France" }],
+        response_format: { type: "json_object" },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    // The fence must be gone so clients can JSON.parse() the content.
+    expect(res.json().choices[0].message.content).toBe('{"capital":"Paris"}');
 
     await app.close();
   });

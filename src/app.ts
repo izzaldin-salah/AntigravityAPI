@@ -13,6 +13,9 @@ import type {
 import { REDACT_LOG_PATHS, type AppConfig } from "./types/config";
 import type { AIProvider } from "./types/provider";
 
+/** Maximum accepted request body (multimodal requests carry base64 images). */
+const MAX_REQUEST_BODY_BYTES = 25 * 1024 * 1024;
+
 export interface BuildAppAdminOptions {
   sessionStore: SessionStore;
   credentialStore: CredentialStore;
@@ -36,6 +39,10 @@ export async function buildApp(
     },
     genReqId: () => `req_${randomUUID()}`,
     trustProxy: options.config.trustProxy,
+    // Multimodal requests carry base64 images, which exceed Fastify's 1 MB
+    // default. The per-image limit in the request validator (8 MB) and this
+    // request ceiling keep the body size bounded.
+    bodyLimit: MAX_REQUEST_BODY_BYTES,
   });
 
   // Register content-type parser for application/x-www-form-urlencoded using standard URLSearchParams

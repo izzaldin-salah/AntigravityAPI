@@ -145,8 +145,12 @@ Request validation (POST /v1/chat/completions):
 - `model`: required non-empty string.
 - `messages`: required non-empty array; roles system|user|assistant|tool|developer
   (developer -> system); content string | array of content parts | null; text
-  parts in an array are flattened to a string, image/audio parts are rejected
-  (the upstream is text-only); `tool_calls` / `tool_call_id` accepted.
+  parts in an array are flattened to a string, image parts are kept as
+  multimodal parts (audio is rejected — the upstream is text+image only);
+  `tool_calls` / `tool_call_id` accepted.
+- `response_format`: optional; `json_object` or `json_schema` (with
+  `json_schema.schema` as a JSON Schema). Anything else -> 400 code
+  `invalid_request`.
 - `stream`: boolean, default false.
 - `temperature` 0..2; `top_p` 0..1; `max_tokens`/`max_completion_tokens` positive
   int (`max_completion_tokens` wins if both); `stop` string|string[] normalized to
@@ -203,6 +207,18 @@ Tool calling (Antigravity provider; live-verified 2026-10-21):
   ("Function call is missing a thought_signature"). The provider keeps the
   signature in memory, keyed by tool call id, and replays it with the follow-up
   request.
+
+Vision and structured output (Antigravity provider; live-verified 2026-10-22):
+- an image content part becomes an upstream `inlineData` part (base64 data URL)
+  or a `fileData` part (http(s) URL — the upstream fetches it; the gateway
+  never fetches a client-supplied URL). Limits: 8 MB per image, 25 MB request.
+- `response_format: json_object` -> `generationConfig.responseMimeType =
+  "application/json"`; `json_schema` additionally sends
+  `generationConfig.responseSchema`, converted to the provider's schema
+  dialect (uppercase type names, fields outside the schema proto dropped,
+  local `$ref`s inlined, at most 5 levels of nesting).
+- in JSON mode the gateway strips a Markdown fence the upstream may add around
+  the payload, so `JSON.parse(message.content)` succeeds as with OpenAI.
 
 Provider error code -> HTTP:
 

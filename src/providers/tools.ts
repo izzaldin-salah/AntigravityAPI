@@ -27,38 +27,9 @@ import type {
   NormalizedChatRequest,
   ToolDefinition,
 } from "../types/provider";
+import { sanitizeSchemaForCca } from "./json-schema";
 
-/**
- * JSON-Schema keywords the Cloud Code Assist schema proto rejects
- * ("Cannot find field" / INVALID_ARGUMENT). Mirrors OMP's
- * CCA_UNSUPPORTED_SCHEMA_FIELDS plus `const`, which OMP adds for CCA.
- */
-const CCA_UNSUPPORTED_SCHEMA_KEYS = new Set([
-  "$schema",
-  "$id",
-  "$anchor",
-  "$ref",
-  "$defs",
-  "$dynamicRef",
-  "$dynamicAnchor",
-  "propertyNames",
-  "deprecated",
-  "readOnly",
-  "writeOnly",
-  "$comment",
-  "uniqueItems",
-  "contains",
-  "minContains",
-  "maxContains",
-  "additionalItems",
-  "contentEncoding",
-  "contentMediaType",
-  "contentSchema",
-  "const",
-]);
-
-/** Guard against pathological or recursive schemas. */
-const MAX_SCHEMA_DEPTH = 12;
+export { sanitizeSchemaForCca } from "./json-schema";
 
 export type FunctionCallingMode = "AUTO" | "ANY" | "NONE" | "VALIDATED";
 
@@ -115,79 +86,6 @@ export const FORCED_TOOL_DIRECTIVE =
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/** Resolve a local JSON pointer (`#/$defs/Thing`) against the schema root. */
-function resolveLocalRef(
-  root: unknown,
-  ref: string,
-): unknown | undefined {
-  if (!ref.startsWith("#/")) return undefined;
-  const segments = ref
-    .slice(2)
-    .split("/")
-    .map((segment) => segment.replace(/~1/g, "/").replace(/~0/g, "~"));
-  let current: unknown = root;
-  for (const segment of segments) {
-    if (!isPlainObject(current)) return undefined;
-    current = current[segment];
-    if (current === undefined) return undefined;
-  }
-  return current;
-}
-
-/**
- * Make a client-supplied JSON Schema acceptable to Cloud Code Assist:
- * inline local `$ref`s, then drop every keyword the schema proto rejects.
- * Unknown-but-harmless keywords are preserved so the model still sees the
- * constraints the client intended.
- */
-export function sanitizeSchemaForCca(
-  schema: unknown,
-  root: unknown = schema,
-  depth = 0,
-  expanding: ReadonlySet<string> = new Set(),
-): unknown {
-  if (depth > MAX_SCHEMA_DEPTH) return {};
-  if (Array.isArray(schema)) {
-    return schema.map((entry) =>
-      sanitizeSchemaForCca(entry, root, depth + 1, expanding),
-    );
-  }
-  if (!isPlainObject(schema)) return schema;
-
-  const output: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(schema)) {
-    if (key === "$ref") {
-      if (typeof value !== "string") continue;
-      const resolved = resolveLocalRef(root, value);
-      if (resolved === undefined) {
-        // Unresolvable reference: dropping the (forbidden) $ref key leaves an
-        // empty schema, which keeps the request valid instead of failing the
-        // whole call with INVALID_ARGUMENT.
-        continue;
-      }
-      if (expanding.has(value)) {
-        continue;
-      }
-      const nextExpanding = new Set(expanding);
-      nextExpanding.add(value);
-      const inlined = sanitizeSchemaForCca(
-        resolved,
-        root,
-        depth + 1,
-        nextExpanding,
-      );
-      if (isPlainObject(inlined)) {
-        Object.assign(output, inlined);
-        continue;
-      }
-      continue;
-    }
-    if (CCA_UNSUPPORTED_SCHEMA_KEYS.has(key)) continue;
-    output[key] = sanitizeSchemaForCca(value, root, depth + 1, expanding);
-  }
-  return output;
 }
 
 /** Map OpenAI tool definitions to the upstream `functionDeclarations` group. */
