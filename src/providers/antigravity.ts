@@ -311,8 +311,7 @@ export class AntigravityProvider implements AIProvider {
       }
       if (detail && /model turn/i.test(detail)) {
         // Self-diagnosing: show the role sequence the client sent.
-        const roles = request.messages.map((message) => message.role).join(" > ");
-        detail = `${detail} (request roles: ${roles})`;
+        detail = this.withRequestRoles(detail, request);
       }
       this.handleHttpError(response.status, detail);
     }
@@ -350,7 +349,7 @@ export class AntigravityProvider implements AIProvider {
       if (chunk.error) {
         const errorCode = chunk.error.code ?? 500;
         const errorMsg = chunk.error.message || chunk.error.status || "Upstream stream error";
-        this.handleHttpError(errorCode, errorMsg);
+        this.handleHttpError(errorCode, this.withRequestRoles(errorMsg, request));
       }
 
       const resp = chunk.response;
@@ -651,6 +650,20 @@ export class AntigravityProvider implements AIProvider {
       }
     }
     this.toolSignatures.set(id, signature);
+  }
+
+  /**
+   * Attach the request role sequence to an upstream error about a model turn,
+   * so the failing shape is visible in the client response (no log access
+   * needed).
+   */
+  private withRequestRoles(
+    message: string,
+    request: NormalizedChatRequest,
+  ): string {
+    if (!/model turn/i.test(message)) return message;
+    const roles = request.messages.map((entry) => entry.role).join(" > ");
+    return `${message} (request roles: ${roles})`;
   }
 
   /**

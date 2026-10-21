@@ -132,4 +132,6 @@ export interface OpenAIHealthResponse {
   uptime: number;
   timestamp: string;
   provider: { mode: string };
+  /** Build metadata of the running process — answers "is this the latest build?". */
+  build?: { commit: string; branch: string; builtAt: string };
 }
