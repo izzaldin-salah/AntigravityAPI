@@ -147,7 +147,11 @@ Request validation (POST /v1/chat/completions):
   (developer -> system); content string | array of content parts | null; text
   parts in an array are flattened to a string, image parts are kept as
   multimodal parts (audio is rejected — the upstream is text+image only);
-  `tool_calls` / `tool_call_id` accepted.
+  `tool_calls` / `tool_call_id` accepted. Image parts are accepted as
+  `image_url` (object or string URL — OpenAI chat), `input_image` (OpenAI
+  Responses) and `image` + `source` (Anthropic: base64 + media_type, or url).
+  An `<img src="data:image/…">`, a Markdown `![…](data:image/…)` or a bare
+  data-URL string found inside the text is lifted into a real image part.
 - `response_format`: optional; `json_object` or `json_schema` (with
   `json_schema.schema` as a JSON Schema). Anything else -> 400 code
   `invalid_request`.
@@ -209,9 +213,15 @@ Tool calling (Antigravity provider; live-verified 2026-10-21):
   request.
 
 Vision and structured output (Antigravity provider; live-verified 2026-10-22):
-- an image content part becomes an upstream `inlineData` part (base64 data URL)
+- image content parts arrive in four client shapes — `image_url`
+  (object/string URL, OpenAI chat), `input_image` (OpenAI Responses),
+  Anthropic `image`+`source`, and an inline `<img>` / Markdown / bare data URL
+  lifted out of the text — and are normalized to one internal image part;
+- that part becomes an upstream `inlineData` part (base64 data URL)
   or a `fileData` part (http(s) URL — the upstream fetches it; the gateway
-  never fetches a client-supplied URL). Limits: 8 MB per image, 25 MB request.
+  never fetches a client-supplied URL). Limits: 8 MB per image decoded and
+  25 MB per request — data URLs have no character cap (base64 is 4/3 of the
+  bytes), remote URLs are capped at 8 KB.
 - `response_format: json_object` -> `generationConfig.responseMimeType =
   "application/json"`; `json_schema` additionally sends
   `generationConfig.responseSchema`, converted to the provider's schema

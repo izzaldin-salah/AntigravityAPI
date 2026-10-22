@@ -257,6 +257,253 @@ describe("personal-antigravity-api API endpoints", () => {
     await app.close();
   });
 
+  it("POST /v1/chat/completions accepts OpenAI Responses and Anthropic image shapes", async () => {
+    let seenMessages: unknown;
+    const provider = new MockTestProvider({
+      chatHandler: async function* (req) {
+        seenMessages = req.messages;
+        yield { type: "start", id: "chat-image-shapes", model: "model", created: 1000 };
+        yield { type: "delta", text: "a logo" };
+        yield { type: "done", finishReason: "stop" };
+      },
+    });
+
+    const app = await buildApp({ config: testConfig, provider });
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: {
+        model: "model",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "input_text", text: "openai responses shape" },
+              { type: "input_image", image_url: "data:image/png;base64,aGVsbG8=" },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "anthropic shape" },
+              {
+                type: "image",
+                source: {
+                  type: "base64",
+                  media_type: "image/webp",
+                  data: "d29ybGQ=",
+                },
+              },
+              {
+                type: "image",
+                source: { type: "url", url: "https://example.com/photo.png" },
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const parts = (seenMessages as Array<{ parts?: unknown }>).map(
+      (message) => message.parts,
+    );
+    expect(parts).toEqual([
+      [
+        { type: "text", text: "openai responses shape" },
+        { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
+      ],
+      [
+        { type: "text", text: "anthropic shape" },
+        { type: "image", mimeType: "image/webp", data: "d29ybGQ=" },
+        {
+          type: "image",
+          mimeType: "image/png",
+          url: "https://example.com/photo.png",
+        },
+      ],
+    ]);
+
+    await app.close();
+  });
+
+  it("POST /v1/chat/completions explains unusable image parts", async () => {
+    const provider = new MockTestProvider();
+    const app = await buildApp({ config: testConfig, provider });
+
+    const fileIdRes = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: {
+        model: "model",
+        messages: [
+          { role: "user", content: [{ type: "input_image", file_id: "file-abc" }] },
+        ],
+      },
+    });
+    expect(fileIdRes.statusCode).toBe(400);
+    expect(fileIdRes.json().error.message).toContain("file_id");
+
+    const unknownRes = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: {
+        model: "model",
+        messages: [{ role: "user", content: [{ type: "media", data: "AAAA" }] }],
+      },
+    });
+    expect(unknownRes.statusCode).toBe(400);
+    expect(unknownRes.json().error.message).toContain("Supported image shapes");
+
+    const missingMediaTypeRes = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: {
+        model: "model",
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "image", source: { type: "base64", data: "AAAA" } }],
+          },
+        ],
+      },
+    });
+    expect(missingMediaTypeRes.statusCode).toBe(400);
+    expect(missingMediaTypeRes.json().error.message).toContain("media_type");
+
+    await app.close();
+  });
+
+  it("POST /v1/chat/completions turns inline <img> and Markdown data URLs into image parts", async () => {
+    let seenMessages: unknown;
+    const provider = new MockTestProvider({
+      chatHandler: async function* (req) {
+        seenMessages = req.messages;
+        yield { type: "start", id: "inline-image", model: "model", created: 1000 };
+        yield { type: "delta", text: "a logo" };
+        yield { type: "done", finishReason: "stop" };
+      },
+    });
+
+    const app = await buildApp({ config: testConfig, provider });
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: {
+        model: "model",
+        messages: [
+          {
+            role: "user",
+            content:
+              '<img src="data:image/png;base64,aGVsbG8=" style="width:260px; display:block;" /> what is this',
+          },
+          { role: "user", content: "![logo](data:image/gif;base64,d29ybGQ=)" },
+          { role: "user", content: "data:image/webp;base64,aGk=" },
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: '<img src="data:image/png;base64,aGVsbG8="> describe',
+              },
+            ],
+          },
+          {
+            role: "user",
+            content: '<img src="https://example.com/photo.png"> text only',
+          },
+        ],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const seen = seenMessages as Array<{
+      content: string | null;
+      parts?: unknown;
+    }>;
+    expect(seen.map((message) => message.content)).toEqual([
+      "what is this",
+      "",
+      "",
+      "describe",
+      '<img src="https://example.com/photo.png"> text only',
+    ]);
+    expect(seen.map((message) => message.parts)).toEqual([
+      [
+        { type: "text", text: "what is this" },
+        { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
+      ],
+      [{ type: "image", mimeType: "image/gif", data: "d29ybGQ=" }],
+      [{ type: "image", mimeType: "image/webp", data: "aGk=" }],
+      [
+        { type: "text", text: "describe" },
+        { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
+      ],
+      undefined,
+    ]);
+
+    await app.close();
+  });
+
+  it("POST /v1/chat/completions accepts large base64 images but caps remote URLs", async () => {
+    let seenParts: unknown;
+    const provider = new MockTestProvider({
+      chatHandler: async function* (req) {
+        seenParts = req.messages[0]?.parts;
+        yield { type: "start", id: "large-image", model: "model", created: 1000 };
+        yield { type: "delta", text: "ok" };
+        yield { type: "done", finishReason: "stop" };
+      },
+    });
+
+    const app = await buildApp({ config: testConfig, provider });
+
+    // A screenshot-sized payload: the old 8 KB URL cap rejected this even
+    // though it is far below the decoded byte limit.
+    const payload = "A".repeat(200_000);
+    const okRes = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: {
+        model: "model",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "what is this?" },
+              {
+                type: "image_url",
+                image_url: { url: `data:image/png;base64,${payload}` },
+              },
+            ],
+          },
+        ],
+      },
+    });
+    expect(okRes.statusCode).toBe(200);
+    const image = (seenParts as Array<{ data?: string }>)[1];
+    expect(image?.data?.length).toBe(payload.length);
+
+    const longUrl = `https://example.com/${"a".repeat(9000)}.png`;
+    const badRes = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      payload: {
+        model: "model",
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "image_url", image_url: { url: longUrl } }],
+          },
+        ],
+      },
+    });
+    expect(badRes.statusCode).toBe(400);
+    expect(badRes.json().error.message).toContain("too long");
+
+    await app.close();
+  });
+
   it("POST /v1/chat/completions rejects audio content parts and unsupported image schemes", async () => {
     const provider = new MockTestProvider();
     const app = await buildApp({ config: testConfig, provider });

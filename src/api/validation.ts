@@ -74,12 +74,11 @@ function contentError(message: string): OpenAIHttpError {
  * to reach internal network addresses.
  */
 function parseImagePart(url: string, index: number): ImagePart {
-  if (url.length > 8192) {
-    throw contentError(
-      `Image URL at message index ${index} is too long (maximum 8192 characters).`,
-    );
-  }
   if (url.startsWith("data:")) {
+    // No character cap here: a data URL *is* the image, and base64 inflates
+    // it by 4/3. The decoded byte limit below is the real bound (the HTTP
+    // body limit bounds the request overall). A cap here would reject every
+    // real screenshot — only tiny test images fit in 8 KB.
     const match = /^data:([^;,]+)(;base64)?,([\s\S]*)$/.exec(url);
     if (!match || !match[2]) {
       throw contentError(
@@ -106,6 +105,11 @@ function parseImagePart(url: string, index: number): ImagePart {
     }
     return { type: "image", mimeType, data };
   }
+  if (url.length > 8192) {
+    throw contentError(
+      `Image URL at message index ${index} is too long (maximum 8192 characters for a remote image URL). Send the image bytes as a base64 data URL instead.`,
+    );
+  }
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -129,6 +133,158 @@ function parseImagePart(url: string, index: number): ImagePart {
     type: "image",
     mimeType: MIME_BY_EXTENSION[extension] ?? "",
     url: parsed.toString(),
+  };
+}
+
+/**
+ * Read an OpenAI-style image part.
+ *
+ * Both published shapes are accepted: Chat Completions nests the URL
+ * (`{type:"image_url", image_url:{url}}`) while the Responses API passes it
+ * directly (`{type:"input_image", image_url:"data:…"}`). Every shape goes
+ * through `parseImagePart`, so all of them share the same limits, the same
+ * SSRF protection and the same error messages.
+ */
+function parseOpenAiImagePart(
+  part: Record<string, unknown>,
+  index: number,
+): ImagePart {
+  const raw = part.image_url;
+  const url =
+    typeof raw === "string"
+      ? raw
+      : isPlainObject(raw) && typeof raw.url === "string"
+        ? raw.url
+        : typeof part.url === "string"
+          ? part.url
+          : "";
+  if (!url) {
+    if (typeof part.file_id === "string") {
+      throw contentError(
+        `Image part at message index ${index} references an uploaded file ('file_id'). This gateway cannot resolve OpenAI file ids — send the image as a base64 data URL or an http(s) URL instead.`,
+      );
+    }
+    throw contentError(
+      `Image part at message index ${index} must carry an 'image_url' with a url.`,
+    );
+  }
+  return parseImagePart(url, index);
+}
+
+/**
+ * Read an Anthropic-style image part (`{ type: "image", source: … }`).
+ *
+ * `{type:"base64", media_type, data}` carries a raw payload with no `data:`
+ * prefix, so a data URL is rebuilt from its fields before the shared
+ * validation runs; `{type:"url", url}` is passed through. A bare `url` (or
+ * `image_url`) field is accepted too, because clients vary.
+ */
+function parseAnthropicImagePart(
+  part: Record<string, unknown>,
+  index: number,
+): ImagePart {
+  const source = part.source;
+  if (isPlainObject(source)) {
+    const sourceType =
+      typeof source.type === "string" ? source.type.toLowerCase() : "";
+    if (
+      sourceType === "url" ||
+      (sourceType === "" && typeof source.url === "string")
+    ) {
+      if (typeof source.url !== "string" || source.url.length === 0) {
+        throw contentError(
+          `Image part at message index ${index} has a 'source' of type 'url' without a url.`,
+        );
+      }
+      return parseImagePart(source.url, index);
+    }
+    const mediaType =
+      typeof source.media_type === "string"
+        ? source.media_type
+        : typeof source.mime_type === "string"
+          ? source.mime_type
+          : typeof part.media_type === "string"
+            ? part.media_type
+            : "";
+    const data =
+      typeof source.data === "string"
+        ? source.data
+        : typeof part.data === "string"
+          ? part.data
+          : "";
+    if (data.length > 0) {
+      // Some clients keep the whole data URL in `data` — do not prefix twice.
+      const url = data.startsWith("data:")
+        ? data
+        : mediaType.startsWith("image/")
+          ? `data:${mediaType};base64,${data}`
+          : "";
+      if (!url) {
+        throw contentError(
+          `Image part at message index ${index} must declare an image 'source.media_type' (for example image/png) next to 'source.data'.`,
+        );
+      }
+      return parseImagePart(url, index);
+    }
+    throw contentError(
+      `Image part at message index ${index} has an unsupported 'source'. Use {type:"base64", media_type, data} or {type:"url", url}.`,
+    );
+  }
+  if (part.image_url !== undefined || typeof part.url === "string") {
+    return parseOpenAiImagePart(part, index);
+  }
+  throw contentError(
+    `Image part at message index ${index} must carry a 'source' ({type:"base64", media_type, data} or {type:"url", url}) or a 'url'.`,
+  );
+}
+
+/**
+ * `<img src="data:image/…">` written into message text.
+ *
+ * Some clients (5ire, for one) attach an image by writing that tag into the
+ * message text and only convert it into real image parts when the model's
+ * "vision" capability is enabled. Without this shim the model receives the
+ * base64 characters as prose — and may answer as if it saw a picture.
+ */
+const HTML_DATA_IMAGE_RE =
+  /<img\b[^>]*?\bsrc\s*=\s*(?:"(data:image\/[^"]*)"|'(data:image\/[^']*)'|(data:image\/[^\s>]+))[^>]*>/gi;
+
+/** Markdown image whose target is a `data:image/…` URL. */
+const MARKDOWN_DATA_IMAGE_RE = /!\[[^\]]*\]\(\s*(data:image\/[^)\s]+)\s*\)/gi;
+
+/**
+ * Pull `data:image/…` images out of message text.
+ *
+ * Only inline data URLs are extracted: they are unambiguous and need no
+ * network fetch. Plain http(s) references, HTML without an image, and prose
+ * that merely mentions an image all stay text.
+ *
+ * Returns `null` when the text carries no inline image, so callers can keep
+ * the fast path.
+ */
+function extractInlineImages(
+  text: string,
+  index: number,
+): { text: string; images: ImagePart[] } | null {
+  const urls: string[] = [];
+  let cleaned = text.replace(HTML_DATA_IMAGE_RE, (_match, dq, sq, uq) => {
+    urls.push(dq ?? sq ?? uq);
+    return " ";
+  });
+  cleaned = cleaned.replace(MARKDOWN_DATA_IMAGE_RE, (_match, url) => {
+    urls.push(url);
+    return " ";
+  });
+  if (urls.length === 0) {
+    // A message that is nothing but a data URL is an image, not prose.
+    const whole = /^\s*(data:image\/\S+)\s*$/.exec(text);
+    if (!whole) return null;
+    urls.push(whole[1]);
+    cleaned = "";
+  }
+  return {
+    text: cleaned.replace(/[ \t]+\n/g, "\n").replace(/\s{2,}/g, " ").trim(),
+    images: urls.map((url) => parseImagePart(url.replace(/&amp;/g, "&"), index)),
   };
 }
 
@@ -158,24 +314,25 @@ function parseContentParts(
     }
     const type = typeof part.type === "string" ? part.type : "";
     if ((type === "text" || type === "input_text") && typeof part.text === "string") {
+      const inline = extractInlineImages(part.text, index);
+      if (inline) {
+        if (inline.text.length > 0) {
+          texts.push(inline.text);
+          messageParts.push({ type: "text", text: inline.text });
+        }
+        messageParts.push(...inline.images);
+        continue;
+      }
       texts.push(part.text);
       messageParts.push({ type: "text", text: part.text });
       continue;
     }
-    if (type === "image_url") {
-      const raw = part.image_url;
-      const url =
-        typeof raw === "string"
-          ? raw
-          : isPlainObject(raw) && typeof raw.url === "string"
-            ? raw.url
-            : "";
-      if (!url) {
-        throw contentError(
-          `Image part at message index ${index} must carry an 'image_url' with a url.`,
-        );
-      }
-      messageParts.push(parseImagePart(url, index));
+    if (type === "image_url" || type === "input_image") {
+      messageParts.push(parseOpenAiImagePart(part, index));
+      continue;
+    }
+    if (type === "image") {
+      messageParts.push(parseAnthropicImagePart(part, index));
       continue;
     }
     if (type === "input_audio" || type === "audio") {
@@ -184,7 +341,7 @@ function parseContentParts(
       );
     }
     throw contentError(
-      `Message content at index ${index} contains an unsupported content part type '${type}'.`,
+      `Message content at index ${index} contains an unsupported content part type '${type}'. Supported image shapes: 'image_url' (OpenAI chat), 'input_image' (OpenAI responses), 'image' with a 'source' (Anthropic).`,
     );
   }
   return { text: texts.join(""), parts: messageParts };
@@ -265,7 +422,17 @@ export function validateAndNormalizeChatRequest(
     let messageParts: MessagePart[] | undefined;
     if (m.content !== undefined && m.content !== null) {
       if (typeof m.content === "string") {
-        content = m.content;
+        const inline = extractInlineImages(m.content, i);
+        if (inline) {
+          content = inline.text;
+          messageParts = [];
+          if (inline.text.length > 0) {
+            messageParts.push({ type: "text", text: inline.text });
+          }
+          messageParts.push(...inline.images);
+        } else {
+          content = m.content;
+        }
       } else if (Array.isArray(m.content)) {
         const parsed = parseContentParts(m.content, i);
         content = parsed.text;

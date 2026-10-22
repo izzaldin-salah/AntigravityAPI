@@ -156,21 +156,23 @@ list. The unofficial Antigravity path remains experimental.
 
 ### Vision (image input)
 
-OpenAI-style image parts are forwarded to the provider, so screenshot-driven
-agents work:
+Image parts are forwarded to the provider, so screenshot-driven agents work.
+Three published shapes are accepted and normalized to the same upstream
+payload — use whichever one your client speaks:
 
 ```json
-{
-  "model": "gemini-3.8-flash-high",
-  "messages": [{
-    "role": "user",
-    "content": [
-      { "type": "text", "text": "What logo is this?" },
-      { "type": "image_url", "image_url": { "url": "data:image/png;base64,iVBORw0…" } }
-    ]
-  }]
-}
+{ "type": "image_url",  "image_url": { "url": "data:image/png;base64,iVBORw0…" } }
+{ "type": "input_image", "image_url": "data:image/png;base64,iVBORw0…" }
+{ "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "iVBORw0…" } }
 ```
+
+- `image_url` — OpenAI chat completions (`image_url` as an object or a string);
+- `input_image` — OpenAI Responses API (`image_url` string or object);
+- `image` — Anthropic Messages, with `source` of
+  `{type:"base64", media_type, data}` (raw base64, no `data:` prefix) or
+  `{type:"url", url}`; a bare `url`/`image_url` field works too.
+
+Every shape is validated the same way:
 
 - a **base64 data URL** is sent as an inline image payload;
 - an **http(s) URL** is passed through for the provider to fetch — the gateway
@@ -178,11 +180,22 @@ agents work:
   internal network addresses; private and local addresses (`localhost`,
   `127.x`, `10.x`, `192.168.x`, …) are rejected up front with guidance,
   because the provider cannot reach them either;
-- limits: 8 MB per image, 25 MB per request;
+- limits: 8 MB per image (decoded) and 25 MB per request — an inline data URL
+  has no character cap (base64 is 4/3 of the bytes), while a remote URL is
+  capped at 8 KB to keep the request sane;
 - audio input is not supported and is rejected with a clear error;
+- an OpenAI `file_id` cannot be resolved — send the bytes or a URL;
 - if the provider rejects a request, **its own explanation is returned**
   (for example *"Cannot fetch content from the provided URL"*) instead of a
   bare status code, so a rejected image tells you what was wrong.
+
+Clients that inline an image into the message text are handled too: an
+`<img src="data:image/…">` tag (5ire writes one when its model has no
+**Vision** capability), a Markdown `![alt](data:image/…)`, or a bare data-URL
+string as the whole content. The data URL is lifted out of the text and sent
+as a real image part, so the model sees the picture instead of reading base64
+characters. Only `data:` URLs are lifted — a plain http(s) reference stays
+text.
 
 > The upstream requires the conversation to **end with a user turn**, and it
 > ignores turns that carry no content. The gateway compensates: a trailing
