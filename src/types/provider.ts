@@ -109,6 +109,8 @@ export interface NormalizedChatRequest {
   requestId: string;
   /** Aborted when the client disconnects or the request is cancelled. */
   signal?: AbortSignal;
+  /** Internal callback owned by the route's shared request deadline. Never populated from client JSON. */
+  onUpstreamProgress?: () => void;
   temperature?: number;
   topP?: number;
   maxTokens?: number;

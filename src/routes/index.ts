@@ -24,6 +24,8 @@ export async function registerRoutes(
     usageTracker: options.usageTracker,
   });
   await app.register(chatRoutes, {
+    timeouts: options.config.provider.timeouts,
+    maxResponseBytes: options.config.provider.maxResponseBytes,
     provider: options.provider,
     usageTracker: options.usageTracker,
   });

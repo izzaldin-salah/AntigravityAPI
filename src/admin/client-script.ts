@@ -155,11 +155,16 @@ export const ADMIN_SCRIPT = `
     const res = await fetch('/admin/api/operations', {cache:'no-store'});
     if (!res.ok) return;
     const data = await res.json();
-    ['requests','inputTokens','outputTokens','failed'].forEach(key => {
+      ['requests','inputTokens','outputTokens','failed','activeRequests'].forEach(key => {
       const node = byId('metric-' + key);
       if (node) node.textContent = formatNumber(data[key]);
     });
     const duration = byId('metric-averageDurationMs');
+      const reliability = byId('reliability-summary');
+      if (reliability && data.latency && data.failureCounts) {
+        const latency = data.latency;
+        reliability.textContent = 'Process-local · last ' + latency.windowSize + ' completed attempts, including connection tests · Completion p50 / p95: ' + (latency.completion.p50Ms ?? '—') + ' / ' + (latency.completion.p95Ms ?? '—') + ' ms · First output p50 / p95: ' + (latency.firstOutput.p50Ms ?? '—') + ' / ' + (latency.firstOutput.p95Ms ?? '—') + ' ms · Timeouts: ' + data.failureCounts.timeout + ' · Protocol errors: ' + data.failureCounts.protocol + ' · Other upstream failures: ' + data.failureCounts.upstream + ' · Size limits: ' + data.failureCounts.limit;
+      }
     if (duration) {
       duration.textContent = data.requests ? formatNumber(data.averageDurationMs) : '—';
       const unit = document.querySelector('[data-unit-for="metric-averageDurationMs"]');

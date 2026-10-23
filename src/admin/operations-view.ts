@@ -57,8 +57,10 @@ export function renderUsage(data: OperationsViewData): string {
         ${stat("Input tokens", number(s.inputTokens), "inputTokens")}
         ${stat("Output tokens", number(s.outputTokens), "outputTokens")}
         ${stat("Failed", number(s.failed), "failed")}
+        ${stat("Active requests", number(s.activeRequests), "activeRequests")}
         ${stat("Average duration", s.requests ? number(s.averageDurationMs) : "—", "averageDurationMs", s.requests ? "ms" : "")}
       </dl>
+      <p class="meta" id="reliability-summary">Process-local · last ${s.latency.windowSize} completed attempts, including connection tests · Completion p50 / p95: ${s.latency.completion.p50Ms ?? "—"} / ${s.latency.completion.p95Ms ?? "—"} ms · First output p50 / p95: ${s.latency.firstOutput.p50Ms ?? "—"} / ${s.latency.firstOutput.p95Ms ?? "—"} ms · Timeouts: ${s.failureCounts.timeout} · Protocol errors: ${s.failureCounts.protocol} · Other upstream failures: ${s.failureCounts.upstream} · Size limits: ${s.failureCounts.limit}</p>
       <div class="chart-layout chart-layout-spaced">
         <figure class="chart-figure">
           <figcaption class="chart-head"><h3>Request volume</h3><span class="chart-meta" id="chart-volume-meta">${e(volumeMeta)}</span></figcaption>
@@ -200,7 +202,7 @@ export function renderStorage(store: CredentialStoreHealth, data: OperationsView
     <p class="notice notice-warn">${e(persistence)}</p>
     ${
       data.hasTokenCache
-        ? '<p class="form-note">The provider also uses a separate local token cache. That cache is plaintext and is not covered by credential-store encryption.</p>'
+        ? '<p class="form-note">The local token cache uses credential encryption when a key is configured. Without a key, caching stays in memory. File caches are ephemeral on Render.</p>'
         : ""
     }
   </section>`;

@@ -13,6 +13,7 @@ import type { AntigravityAccountStatus, CredentialStore } from "../types/admin";
 import type { AntigravityCredentials } from "../types/config";
 import { TokenManager } from "./token-manager";
 import { parseSseStream } from "./sse";
+import { abortable, cancellationReason, createChatDeadline, type ChatTimeouts } from "../core/chat-deadline";
 import { randomBytes } from "node:crypto";
 import {
   buildFunctionResponsePart,
@@ -110,6 +111,7 @@ export class AntigravityProvider implements AIProvider {
   private settingsStore?: ModelSettingsStore;
   private settingsLoaded?: Promise<void>;
   private settingsWrite: Promise<unknown> = Promise.resolve();
+  private timeouts?: Partial<ChatTimeouts>;
   /**
    * Thought signatures of emitted tool calls, keyed by tool call id. Gemini 3
    * family models reject a replayed function call that lost its signature, so
@@ -132,15 +134,21 @@ export class AntigravityProvider implements AIProvider {
       credentialStore?: CredentialStore;
       tokenEndpoint?: string;
       modelSettingsStore?: ModelSettingsStore;
+      timeouts?: Partial<ChatTimeouts>;
+      cacheEncryptionKey?: string;
+      cacheWarning?: (message:string)=>void;
     } = {},
   ) {
     this.fetchImpl = options.fetch ?? globalThis.fetch;
+    this.timeouts = options.timeouts;
     this.settingsStore = options.modelSettingsStore;
     this.endpoint = (credentials.endpoint || DEFAULT_ANTIGRAVITY_ENDPOINT).replace(/\/+$/, "");
     this.tokenManager = new TokenManager({
       credentials,
       credentialStore: options.credentialStore,
       tokenEndpoint: options.tokenEndpoint,
+      encryptionKey: options.cacheEncryptionKey,
+      warn: options.cacheWarning,
       fetch: this.fetchImpl,
     });
   }
@@ -223,6 +231,25 @@ export class AntigravityProvider implements AIProvider {
   }
 
   async *chat(request: NormalizedChatRequest): AsyncIterable<ProviderEvent> {
+    const deadline = request.onUpstreamProgress ? undefined : createChatDeadline(request.signal,this.timeouts);
+    const effective = deadline ? {...request,signal:deadline.signal,onUpstreamProgress:deadline.progress} : request;
+    const iterator = this.chatUpstream(effective)[Symbol.asyncIterator]();
+    try {
+      while(true) {
+        const next = await abortable(iterator.next(),effective.signal!);
+        if(next.done) break;
+        yield next.value;
+      }
+    } catch(error) {
+      if(effective.signal?.aborted) throw cancellationReason(effective.signal);
+      throw error;
+    } finally {
+      deadline?.dispose();
+      void iterator.return?.(undefined).catch(()=>undefined);
+    }
+  }
+
+  private async *chatUpstream(request: NormalizedChatRequest): AsyncGenerator<ProviderEvent> {
     if (request.signal?.aborted) {
       throw new ProviderError({
         code: "aborted",
@@ -246,10 +273,10 @@ export class AntigravityProvider implements AIProvider {
     const effectiveModel = selection.publicModel;
 
     // Step 1: Resolve access token
-    let accessToken = await this.tokenManager.getAccessToken(request.signal);
-
     const streamUrl = `${this.endpoint}/v1internal:streamGenerateContent?alt=sse`;
-    const upstreamBody = this.buildUpstreamRequest(request, selection);
+    this.buildUpstreamRequest(request, selection); // Validate before refreshing credentials.
+    let accessToken = await this.tokenManager.getAccessToken(request.signal);
+    const upstreamBody = this.buildUpstreamRequest(request, selection); // Cache loading may resolve projectId.
 
     // Step 2: Call upstream with at most one refresh retry on 401
     let response: Response;
@@ -326,7 +353,7 @@ export class AntigravityProvider implements AIProvider {
 
     // Step 3: Stream parsing and yielding ProviderEvents
     let started = false;
-    let finishReasonRecorded: FinishReason = "stop";
+    let finishReasonRecorded: FinishReason | undefined;
     let recordedUsage: UsageInfo | undefined;
     let promptTokens = 0;
     let completionTokens = 0;
@@ -354,6 +381,7 @@ export class AntigravityProvider implements AIProvider {
 
       const resp = chunk.response;
       if (!resp) continue;
+      if (resp.candidates?.length || resp.usageMetadata) request.onUpstreamProgress?.();
 
       if (!started) {
         yield {
@@ -411,15 +439,8 @@ export class AntigravityProvider implements AIProvider {
       }
     }
 
-    if (!started) {
-      // If stream ended without any candidate payload, ensure start was sent
-      yield {
-        type: "start",
-        id: streamId,
-        model: effectiveModel,
-        created,
-      };
-    }
+    request.signal?.throwIfAborted();
+    if (!finishReasonRecorded) throw new ProviderError({code:"upstream_error",message:"Upstream stream ended without a model finish reason.",status:502,details:{kind:"protocol"}});
 
     if (toolCallEmitted && finishReasonRecorded === "stop") {
       // Gemini reports STOP for a turn that ended in a function call. The

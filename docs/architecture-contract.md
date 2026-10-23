@@ -1,5 +1,36 @@
 # Architecture Contract — personal-antigravity-api
 
+## Maintenance amendment — 2026-10-22
+
+The approved API reliability plan (`tasks/plan.md`) supersedes historical frozen
+ownership rules for this maintenance work. The current runtime/development floor
+follows the locked Vitest engine range; CI uses Node 24 LTS. No deployment or
+Render configuration changes are part of this amendment.
+
+- Chats use positive first-response/idle/total deadlines (120000/120000/600000 ms
+  defaults), composed with client cancellation, and a configurable 16 MiB output
+  cap. Internal `NormalizedChatRequest.onUpstreamProgress` is never client input;
+  it connects provider progress to the route's shared deadline.
+- Upstream SSE parsing rejects malformed events/UTF-8 and incomplete model
+  completion. `done` with `finishReason: error` is an error response, superseding
+  the older error-to-stop rule in section 8. Response writes honor backpressure.
+- JSON fence filtering preserves content across arbitrary chunks. Schema property
+  maps preserve names, response type unions preserve supported branches, and named
+  tools narrow declarations. Function responses carry their correlated call IDs.
+- Image validation uses decoded size with strict base64 syntax; request/image
+  limits remain 25 MiB/8 MiB.
+- Token caches reuse the account encryption envelope with a separate payload
+  marker. Both cache paths require a key to write disk; keyless operation is
+  memory-only. Migration verifies encrypted temporary data before atomic rename;
+  failure preserves the original. Account-store records and keys remain compatible.
+- Request metrics add active attempts, categorized failure counters and bounded
+  p50/p95 first-output/completion samples over the latest 50 completed attempts.
+  Metadata is process-local and includes API and connection-test sources.
+
+See `docs/api-reliability.md` for configuration, migration and verification.
+
+---
+
 Version: 1.1 (frozen for the 3-agent build + account-dashboard wave) · Owner: coordinator · Status: FROZEN
 
 ## 0. How to use this document

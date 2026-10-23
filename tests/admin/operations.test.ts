@@ -140,7 +140,8 @@ describe("Operational status presentation", () => {
     expect(renderStorage({ backend: "redis", ok: true }, data)).toContain("Those settings are not verified here");
     expect(renderStorage({ backend: "file", ok: true }, data)).toContain("same disk");
     expect(renderStorage({ backend: "file", ok: false }, { ...data, isRender: true })).toContain("ephemeral");
-    expect(renderStorage({ backend: "file", ok: true }, data)).toContain("plaintext");
+    expect(renderStorage({ backend: "file", ok: true }, data)).toContain("caching stays in memory");
+    expect(renderUsage(data)).toContain("First output p50 / p95");
   });
   it("gives different recovery steps for expired tokens with and without refresh credentials", () => {
     const status = { providerMode: "antigravity" as const, connected: true, hasRefreshToken: true, needsReconnect: false, accessTokenExpiresAt: Date.now() - 1000 };

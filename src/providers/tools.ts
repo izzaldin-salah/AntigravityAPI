@@ -5,7 +5,7 @@
  * Reference implementation: Oh My Pi (MIT) —
  *   packages/ai/src/providers/google-gemini-cli.ts   (tools, toolConfig, forced-tool directive)
  *   packages/ai/src/providers/google-shared.ts       (functionCall / functionResponse parts)
- *   packages/ai/src/utils/schema/fields.ts          (CCA-unsupported schema keywords)
+ *   packages/ai/src/utils/schema/{fields,normalize,spill}.ts (schema normalization)
  * Provenance and the upstream findings are recorded in docs/omp-analysis.md §12.
  *
  * Wire facts this module encodes (all verified against the OMP source):
@@ -28,6 +28,7 @@ import type {
   ToolDefinition,
 } from "../types/provider";
 import { sanitizeSchemaForCca } from "./json-schema";
+import { ProviderError } from "../types/provider";
 
 export { sanitizeSchemaForCca } from "./json-schema";
 
@@ -70,6 +71,7 @@ export interface UpstreamFunctionCallPart {
 export interface UpstreamFunctionResponsePart {
   [key: string]: unknown;
   functionResponse: {
+    id?: string;
     name: string;
     response: { output: string };
   };
@@ -88,7 +90,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Map OpenAI tool definitions to the upstream `functionDeclarations` group. */
+/** Map OpenAI tools, projecting parameter schemas at the upstream boundary. */
 export function buildUpstreamTools(
   tools: ToolDefinition[] | undefined,
 ): UpstreamTool[] | undefined {
@@ -106,7 +108,7 @@ export function buildUpstreamTools(
     if (fn.parameters) {
       const sanitized = sanitizeSchemaForCca(fn.parameters);
       if (isPlainObject(sanitized)) {
-        declaration.parameters = sanitized as Record<string, unknown>;
+        declaration.parameters = sanitized;
       }
     }
     declarations.push(declaration);
@@ -140,6 +142,10 @@ export function planToolCall(input: {
   toolChoice?: NormalizedChatRequest["toolChoice"];
 }): ToolPlan {
   const upstreamTools = buildUpstreamTools(input.tools);
+  const namedChoice = input.toolChoice && typeof input.toolChoice === "object" ? input.toolChoice.function.name : undefined;
+  if (namedChoice !== undefined && !upstreamTools?.[0].functionDeclarations.some(fn => fn.name === namedChoice)) {
+    throw new ProviderError({code:"invalid_request",message:"The selected tool must be declared in tools.",status:400});
+  }
   if (!upstreamTools) return {};
 
   const choice = input.toolChoice;
@@ -151,11 +157,11 @@ export function planToolCall(input: {
       return { tools: upstreamTools, toolConfig: { functionCallingConfig: { mode: "VALIDATED" } } };
     }
     return {
-      tools: upstreamTools,
+      tools: [{functionDeclarations: upstreamTools[0].functionDeclarations.filter(fn => fn.name === name)}],
       toolConfig: {
         functionCallingConfig: { mode: "ANY", allowedFunctionNames: [name] },
       },
-      forcedDirective: FORCED_TOOL_DIRECTIVE,
+      forcedDirective: `${FORCED_TOOL_DIRECTIVE} Call the function ${JSON.stringify(name)}.`,
     };
   }
 
@@ -203,6 +209,7 @@ export function buildFunctionResponsePart(
   if (!name) return null;
   return {
     functionResponse: {
+      ...(message.tool_call_id ? {id: message.tool_call_id} : {}),
       name,
       response: { output: message.content ?? "" },
     },

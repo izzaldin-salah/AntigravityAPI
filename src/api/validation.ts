@@ -91,19 +91,26 @@ function parseImagePart(url: string, index: number): ImagePart {
         `Image at message index ${index} has mime type '${mimeType}'. Only image data URLs are supported.`,
       );
     }
-    const data = match[3].replace(/\s+/g, "");
+    const data = match[3];
     if (data.length === 0) {
       throw contentError(
         `Image at message index ${index} is empty. Send the image bytes or a reachable URL.`,
       );
     }
-    const bytes = Math.floor((data.length * 3) / 4);
+    const unpadded = data.replace(/=+$/, "");
+    const remainder = unpadded.length % 4;
+    const padding = data.length - unpadded.length;
+    if (/[^A-Za-z0-9+/=]/.test(data) || unpadded.includes("=") || remainder === 1 ||
+        (padding > 0 && (padding > 2 || data.length % 4 !== 0 || padding !== (4 - remainder) % 4))) {
+      throw contentError(`Image at message index ${index} contains invalid base64 data.`);
+    }
+    const bytes = Math.floor((unpadded.length * 3) / 4);
     if (bytes > MAX_IMAGE_BYTES) {
       throw contentError(
         `Image at message index ${index} is ${bytes} bytes, above the ${MAX_IMAGE_BYTES} byte limit.`,
       );
     }
-    return { type: "image", mimeType, data };
+    return { type: "image", mimeType, data: unpadded + "=".repeat((4 - remainder) % 4) };
   }
   if (url.length > 8192) {
     throw contentError(

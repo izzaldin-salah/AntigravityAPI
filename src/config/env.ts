@@ -24,6 +24,10 @@ export class ConfigError extends Error {
 }
 
 const envSchema = z.object({
+  ANTIGRAVITY_FIRST_RESPONSE_TIMEOUT_MS: z.coerce.number().int().positive().max(2147483647).default(120000),
+  ANTIGRAVITY_IDLE_TIMEOUT_MS: z.coerce.number().int().positive().max(2147483647).default(120000),
+  ANTIGRAVITY_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().max(2147483647).default(600000),
+  ANTIGRAVITY_MAX_RESPONSE_BYTES: z.coerce.number().int().positive().max(256*1024*1024).default(16*1024*1024),
   NODE_ENV: z
     .enum(["development", "production", "test"], {
       message: "NODE_ENV must be one of: 'development', 'production', 'test'",
@@ -338,6 +342,8 @@ export function loadConfigWithDiagnostics(
   const provider: ProviderConfig = {
     mode: "antigravity",
     credentials: pickAntigravity(validated),
+    maxResponseBytes: validated.ANTIGRAVITY_MAX_RESPONSE_BYTES,
+    timeouts: {firstResponseMs:validated.ANTIGRAVITY_FIRST_RESPONSE_TIMEOUT_MS,idleMs:validated.ANTIGRAVITY_IDLE_TIMEOUT_MS,totalMs:validated.ANTIGRAVITY_REQUEST_TIMEOUT_MS},
   };
 
   const scopesRaw = validated.ANTIGRAVITY_OAUTH_SCOPES?.trim();

@@ -1,5 +1,9 @@
 # Security Model and Architecture — personal-antigravity-api
 
+Maintenance update: both token-cache write paths now use the credential store's
+AES-256-GCM envelope. Keyless operation uses memory only. See
+[cache migration and reliability](api-reliability.md) for failure/recovery behavior.
+
 > **MANDATORY RISK STATEMENT:**
 > Antigravity OAuth integration through third-party applications is unofficial and may violate Google's Terms of Service. Use of this software carries a risk of Google account suspension or termination.
 > - This project does **NOT** attempt to circumvent provider restrictions, quotas, rate limits, or safety guardrails.

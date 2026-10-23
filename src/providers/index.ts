@@ -12,13 +12,16 @@ export { createOAuthService, createPkcePair, maskEmail } from "./oauth";
 
 export function createProviderFromConfig(
   config: ProviderConfig,
-  deps?: { credentialStore?: CredentialStore; tokenEndpoint?: string; modelSettingsStore?: ModelSettingsStore },
+  deps?: { credentialStore?: CredentialStore; tokenEndpoint?: string; modelSettingsStore?: ModelSettingsStore; cacheEncryptionKey?:string; cacheWarning?:(message:string)=>void },
 ): AIProvider {
   if (config.mode === "antigravity") {
     return new AntigravityProvider(config.credentials, {
       credentialStore: deps?.credentialStore,
       tokenEndpoint: deps?.tokenEndpoint,
       modelSettingsStore: deps?.modelSettingsStore,
+      timeouts: config.timeouts,
+      cacheEncryptionKey: deps?.cacheEncryptionKey,
+      cacheWarning: deps?.cacheWarning,
     });
   }
 

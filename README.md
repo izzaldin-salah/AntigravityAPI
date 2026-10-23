@@ -25,6 +25,14 @@ Native Node.js deployment on **Render Free — no Docker**.
 
 ## Quick start
 
+Use **Node.js 24 LTS**, the CI runtime. The locked Vitest version requires Node
+`^22.12.0 || ^24.0.0 || >=26.0.0`; Node 20 is no longer supported for development.
+See [Node releases](https://nodejs.org/en/about/previous-releases).
+
+See [API reliability and local testing](docs/api-reliability.md) for deadlines,
+size limits, compatibility fixes, dashboard metrics, CI, the local load harness,
+and encrypted token-cache migration.
+
 ```bash
 npm ci
 npm run build

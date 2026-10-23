@@ -4,8 +4,44 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { TokenManager } from "../../src/providers/token-manager";
 import { ProviderError } from "../../src/types/provider";
+import { saveTokenStore } from "../../src/security/token-store";
 
 describe("TokenManager", () => {
+  it("does not restore stale credentials when an in-flight refresh finishes after disconnect",async()=>{
+    let finish:(response:Response)=>void=()=>{};
+    const fetcher=vi.fn(()=>new Promise<Response>(resolve=>{finish=resolve;}));
+    const manager=new TokenManager({credentials:{refreshToken:"old-account"},fetch:fetcher});
+    const refreshing=manager.refreshAccessToken();
+    const rejection=expect(refreshing).rejects.toMatchObject({payload:{code:"aborted"}});
+    await vi.waitFor(()=>expect(fetcher).toHaveBeenCalled());
+    await manager.clearCredentials();
+    finish(new Response(JSON.stringify({access_token:"STALE_TOKEN",expires_in:3600}),{status:200}));
+    await rejection;expect((await manager.getStatus()).connected).toBe(false);
+  });
+  it("lets one refresh waiter cancel without cancelling another request",async()=>{
+    let finish:(response:Response)=>void=()=>{};
+    let networkSignal:AbortSignal|null|undefined;
+    const fetcher=vi.fn((_url:unknown,init?:RequestInit)=>{networkSignal=init?.signal;return new Promise<Response>(resolve=>{finish=resolve;});});
+    const manager=new TokenManager({credentials:{refreshToken:"shared"},fetch:fetcher});
+    const caller=new AbortController();const first=manager.refreshAccessToken(caller.signal);
+    const rejected=expect(first).rejects.toMatchObject({payload:{code:"aborted"}});
+    const second=manager.refreshAccessToken();
+    await vi.waitFor(()=>expect(fetcher).toHaveBeenCalledTimes(1));
+    caller.abort();await rejected;expect(networkSignal?.aborted).toBe(false);
+    finish(new Response(JSON.stringify({access_token:"shared-token",expires_in:3600}),{status:200}));
+    expect(await second).toBe("shared-token");
+  });
+  it("keeps keyless refresh in memory and preserves environment identity over cached identity",async()=>{
+    const dir=await fs.promises.mkdtemp(path.join(os.tmpdir(),"manager-cache-"));const file=path.join(dir,"cache.json");
+    try {
+      const fetcher=vi.fn(async()=>new Response(JSON.stringify({access_token:"NEW_ACCESS",expires_in:3600}),{status:200}));
+      const warn=vi.fn();const keyless=new TokenManager({credentials:{refreshToken:"ENV_REFRESH",tokenStorePath:file},fetch:fetcher,warn});
+      expect(await keyless.refreshAccessToken()).toBe("NEW_ACCESS");expect(fs.existsSync(file)).toBe(false);expect(warn).toHaveBeenCalled();
+      await saveTokenStore(file,{accessToken:"OLD_ACCOUNT_ACCESS",refreshToken:"OLD_ACCOUNT_REFRESH",expiresAt:Date.now()+3600000},{encryptionKey:"key"});
+      const manager=new TokenManager({credentials:{refreshToken:"ENV_REFRESH",tokenStorePath:file},encryptionKey:"key",fetch:fetcher});
+      expect(await manager.getAccessToken()).toBe("NEW_ACCESS");
+    } finally {await fs.promises.rm(dir,{recursive:true,force:true});}
+  });
   it("asserts token refresh request shape (URL, headers, body parameters)", async () => {
     let capturedUrl = "";
     let capturedMethod = "";
@@ -99,6 +135,7 @@ describe("TokenManager", () => {
 
     // Manager 1: performs refresh and writes to disk
     const manager1 = new TokenManager({
+      encryptionKey: "manager-cache-test-key",
       credentials: {
         refreshToken: "refresh-for-disk",
         projectId: "disk-project",
@@ -110,9 +147,11 @@ describe("TokenManager", () => {
     const token1 = await manager1.refreshAccessToken();
     expect(token1).toBe("disk-cached-token-abc");
     expect(fs.existsSync(tokenStorePath)).toBe(true);
+    expect(fs.readFileSync(tokenStorePath,"utf8")).not.toContain("disk-cached-token-abc");
 
     // Manager 2: initialized without access token, should read cached token from disk
     const manager2 = new TokenManager({
+      encryptionKey: "manager-cache-test-key",
       credentials: {
         tokenStorePath,
       },

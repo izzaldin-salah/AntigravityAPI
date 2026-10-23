@@ -47,21 +47,20 @@ describe("tool mapping helpers", () => {
 
       const properties = sanitized.properties as Record<string, Record<string, unknown>>;
       expect(properties.name).toEqual({ type: "string" });
-      expect(properties.count).toEqual({ type: "integer" });
+      expect(properties.count).toEqual({ type: "integer", description: "{const: 3}" });
     });
 
-    it("keeps keywords the upstream accepts", () => {
+    it("keeps accepted keywords and describes unsupported object constraints", () => {
       const sanitized = sanitizeSchemaForCca({
         type: "object",
         description: "root",
-        properties: { city: { type: "string", description: "city name" } },
+        properties: { city: { type: "string", description: "city name", enum: ["a", "b"] } },
         additionalProperties: false,
-        enum: ["a", "b"],
       }) as Record<string, unknown>;
 
-      expect(sanitized.description).toBe("root");
-      expect(sanitized.additionalProperties).toBe(false);
-      expect(sanitized.enum).toEqual(["a", "b"]);
+      expect(sanitized.description).toBe("root\n\n{additionalProperties: false}");
+      expect(sanitized).not.toHaveProperty("additionalProperties");
+      expect(sanitized.properties).toEqual({ city: { type: "string", description: "city name", enum: ["a", "b"] } });
     });
 
     it("inlines local $ref pointers and removes the $defs block", () => {
@@ -75,13 +74,13 @@ describe("tool mapping helpers", () => {
       expect(sanitized.properties).toEqual({ item: { type: "string", enum: ["x"] } });
     });
 
-    it("replaces an unresolvable $ref with an empty schema instead of failing", () => {
+    it("describes an unresolvable $ref instead of forwarding a rejected field", () => {
       const sanitized = sanitizeSchemaForCca({
         type: "object",
         properties: { item: { $ref: "#/$defs/Missing" } },
       }) as Record<string, unknown>;
 
-      expect(sanitized.properties).toEqual({ item: {} });
+      expect(sanitized.properties).toEqual({ item: { description: "Unresolved schema reference: #/$defs/Missing" } });
     });
   });
 
@@ -113,6 +112,17 @@ describe("tool mapping helpers", () => {
   });
 
   describe("planToolCall", () => {
+    it("restricts named declarations even without toolConfig and rejects unknown names", () => {
+      const tools: ToolDefinition[] = [weatherTool,{type:"function",function:{name:"get_time"}}];
+      const plans = ["get_weather","get_time"].map(name => planToolCall({tools,toolChoice:{type:"function",function:{name}}}));
+      expect(plans[0].tools?.[0].functionDeclarations.map(fn => fn.name)).toEqual(["get_weather"]);
+      expect(plans[1].tools?.[0].functionDeclarations.map(fn => fn.name)).toEqual(["get_time"]);
+      expect(plans[0].forcedDirective).toContain("get_weather");
+      expect(plans[1].forcedDirective).toContain("get_time");
+      expect(() => planToolCall({tools,toolChoice:{type:"function",function:{name:"missing"}}})).toThrow(/declared/);
+      expect(() => planToolCall({toolChoice:{type:"function",function:{name:"missing"}}})).toThrow(/declared/);
+      expect(() => planToolCall({tools,toolChoice:{type:"function",function:{name:""}}})).toThrow(/declared/);
+    });
     it("ignores tool_choice when the client declared no tools", () => {
       expect(planToolCall({ toolChoice: "required" })).toEqual({});
     });
@@ -147,11 +157,20 @@ describe("tool mapping helpers", () => {
       expect(plan.toolConfig).toEqual({
         functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["get_weather"] },
       });
-      expect(plan.forcedDirective).toBe(FORCED_TOOL_DIRECTIVE);
+      expect(plan.forcedDirective).toBe(`${FORCED_TOOL_DIRECTIVE} Call the function "get_weather".`);
     });
   });
 
   describe("tool result mapping", () => {
+    it("keeps correlation when same-name results arrive in reverse order", () => {
+      const names = new Map([["paris","get_weather"],["cairo","get_weather"]]);
+      const results = ["cairo","paris"].map(id => buildFunctionResponsePart({role:"tool",tool_call_id:id,content:id},names));
+      expect(results.map(part => part?.functionResponse)).toEqual([
+        {id:"cairo",name:"get_weather",response:{output:"cairo"}},
+        {id:"paris",name:"get_weather",response:{output:"paris"}},
+      ]);
+      expect(buildFunctionResponsePart({role:"tool",name:"legacy",content:"ok"},names)?.functionResponse).not.toHaveProperty("id");
+    });
     const messages: ChatMessage[] = [
       { role: "user", content: "weather in Paris?" },
       {
@@ -174,7 +193,7 @@ describe("tool mapping helpers", () => {
 
       const part = buildFunctionResponsePart(messages[2], names);
       expect(part).toEqual({
-        functionResponse: { name: "get_weather", response: { output: "18C" } },
+        functionResponse: { id: "call_abc", name: "get_weather", response: { output: "18C" } },
       });
     });
 

@@ -1,5 +1,4 @@
-import * as fs from "node:fs";
-import * as path from "node:path";
+import { loadTokenStore, saveTokenStore, clearTokenStore, type TokenStoreOptions } from "../security/token-store";
 import type {
   AntigravityAccountStatus,
   CredentialStore,
@@ -8,6 +7,7 @@ import type {
 import type { AntigravityCredentials } from "../types/config";
 import { GOOGLE_OAUTH_TOKEN_ENDPOINT } from "../types/config";
 import { ProviderError } from "../types/provider";
+import { abortable, cancellationReason } from "../core/chat-deadline";
 
 const OAUTH_REFRESH_SKEW_MS = 60_000;
 
@@ -16,6 +16,8 @@ export interface TokenManagerOptions {
   credentialStore?: CredentialStore;
   tokenEndpoint?: string;
   fetch?: typeof fetch;
+  encryptionKey?: string;
+  warn?: (message:string)=>void;
 }
 
 export class TokenManager {
@@ -32,8 +34,11 @@ export class TokenManager {
   private accountHint?: string;
   private expiresAt?: number;
   private tokenStorePath?: string;
+  private cacheOptions: TokenStoreOptions;
+  private cacheReady: Promise<void>;
 
-  private refreshPromise?: Promise<string>;
+  private refreshOperation?: {promise:Promise<string>;controller:AbortController;waiters:number;settled:boolean};
+  private credentialGeneration=0;
   private needsReconnect: boolean = false;
   private lastRefreshAt?: number;
   private lastError?: string;
@@ -47,6 +52,7 @@ export class TokenManager {
     this.tokenEndpoint = options.tokenEndpoint ?? GOOGLE_OAUTH_TOKEN_ENDPOINT;
     this.fetchImpl = options.fetch ?? globalThis.fetch;
     this.tokenStorePath = options.credentials?.tokenStorePath;
+    this.cacheOptions = {encryptionKey:options.encryptionKey,warn:options.warn};
 
     if (options.credentials) {
       this.accessToken = options.credentials.accessToken;
@@ -56,7 +62,7 @@ export class TokenManager {
       this.projectId = options.credentials.projectId;
     }
 
-    this.tryLoadFromTokenStore();
+    this.cacheReady = this.loadFromTokenCache();
   }
 
   getProjectId(): string | undefined {
@@ -102,16 +108,33 @@ export class TokenManager {
   }
 
   async refreshAccessToken(signal?: AbortSignal): Promise<string> {
-    // Single-flight in-progress refresh
-    if (this.refreshPromise) {
-      return this.refreshPromise;
+    if(signal?.aborted) throw cancellationReason(signal);
+    let operation=this.refreshOperation;
+    if(!operation) {
+      const controller=new AbortController();
+      const current={controller,waiters:0,settled:false,promise:Promise.resolve("")};
+      current.promise=this.performRefresh(controller.signal).finally(()=>{
+        current.settled=true;
+        if(this.refreshOperation===current) this.refreshOperation=undefined;
+      });
+      operation=current;this.refreshOperation=current;
     }
+    operation.waiters++;
+    try {
+      const sharedSignal=signal?AbortSignal.any([signal,operation.controller.signal]):operation.controller.signal;
+      return await abortable(operation.promise,sharedSignal);
+    } finally {
+      operation.waiters--;
+      if(operation.waiters===0 && !operation.settled) {
+        operation.controller.abort(new ProviderError({code:"aborted",message:"All refresh callers cancelled."}));
+        if(this.refreshOperation===operation) this.refreshOperation=undefined;
+      }
+    }
+  }
 
-    this.refreshPromise = this.performRefresh(signal).finally(() => {
-      this.refreshPromise = undefined;
-    });
-
-    return this.refreshPromise;
+  private cancelRefresh():void {
+    this.refreshOperation?.controller.abort(new ProviderError({code:"aborted",message:"Credentials changed."}));
+    this.refreshOperation=undefined;
   }
 
   async setCredentials(creds: {
@@ -121,6 +144,8 @@ export class TokenManager {
     projectId?: string;
     accountHint?: string;
   }): Promise<void> {
+    this.credentialGeneration++;
+    this.cancelRefresh();
     this.isManuallyMutated = true;
     this.memoryCleared = false;
     this.refreshToken = creds.refreshToken;
@@ -146,6 +171,9 @@ export class TokenManager {
   }
 
   async clearCredentials(): Promise<void> {
+    this.credentialGeneration++;
+    this.cancelRefresh();
+    await this.cacheReady;
     this.isManuallyMutated = true;
     this.memoryCleared = true;
     this.refreshToken = undefined;
@@ -158,12 +186,15 @@ export class TokenManager {
     this.needsReconnect = false;
     this.lastError = undefined;
 
+    await clearTokenStore(this.tokenStorePath,this.cacheOptions);
     if (this.credentialStore) {
       await this.credentialStore.clear();
     }
   }
 
   async reloadFromStore(): Promise<void> {
+    this.credentialGeneration++;
+    this.cancelRefresh();
     this.isManuallyMutated = true;
     this.memoryCleared = false;
     if (this.credentialStore) {
@@ -222,6 +253,7 @@ export class TokenManager {
   }
 
   private async resolveCredentials(): Promise<void> {
+    await this.cacheReady;
     if (this.memoryCleared) {
       return;
     }
@@ -273,6 +305,7 @@ export class TokenManager {
   }
 
   private async performRefresh(signal?: AbortSignal): Promise<string> {
+    const generation=this.credentialGeneration;
     await this.resolveCredentials();
 
     if (!this.refreshToken) {
@@ -356,6 +389,9 @@ export class TokenManager {
     }
 
     const record = data as Record<string, unknown>;
+    if(generation!==this.credentialGeneration || signal?.aborted) {
+      throw new ProviderError({code:"aborted",message:"Credentials changed or refresh was cancelled."});
+    }
     const newAccessToken = typeof record.access_token === "string" ? record.access_token : undefined;
     if (!newAccessToken) {
       throw new ProviderError({
@@ -373,55 +409,32 @@ export class TokenManager {
     this.lastRefreshAt = Date.now();
 
     // Persist to disk best-effort if tokenStorePath is used
-    this.trySaveToTokenStore();
+    await this.saveToTokenCache();
 
     return this.accessToken;
   }
 
-  private tryLoadFromTokenStore(): void {
-    if (!this.tokenStorePath) return;
-
-    try {
-      const fullPath = path.resolve(this.tokenStorePath);
-      if (fs.existsSync(fullPath)) {
-        const raw = fs.readFileSync(fullPath, "utf-8");
-        const parsed = JSON.parse(raw) as Record<string, unknown>;
-        if (typeof parsed.accessToken === "string" && !this.accessToken) {
-          this.accessToken = parsed.accessToken;
-        }
-        if (typeof parsed.refreshToken === "string" && !this.refreshToken) {
-          this.refreshToken = parsed.refreshToken;
-        }
-        if (typeof parsed.expiresAt === "number" && this.expiresAt === undefined) {
-          this.expiresAt = parsed.expiresAt;
-        }
-        if (typeof parsed.projectId === "string" && !this.projectId) {
-          this.projectId = parsed.projectId;
-        }
-      }
-    } catch {
-      // Best-effort; never throw
-    }
+  private async loadFromTokenCache(): Promise<void> {
+    const cached=await loadTokenStore(this.tokenStorePath,this.cacheOptions);
+    if(!cached || this.isManuallyMutated || this.memoryCleared) return;
+    // An account store is authoritative; an old opportunistic cache must never
+    // resurrect a disconnected dashboard account or cross account identities.
+    if(this.credentialStore && !this.hasEnvCredentials()) return;
+    const sameIdentity=!this.envCredentials?.refreshToken || this.envCredentials.refreshToken===cached.refreshToken;
+    if(!sameIdentity) return;
+    this.accessToken ||= cached.accessToken;
+    this.refreshToken ||= cached.refreshToken;
+    this.projectId ||= cached.projectId;
+    if(!this.envCredentials?.accessToken && this.expiresAt===undefined) this.expiresAt=cached.expiresAt;
   }
 
-  private trySaveToTokenStore(): void {
-    if (!this.tokenStorePath) return;
-
-    try {
-      const fullPath = path.resolve(this.tokenStorePath);
-      const dir = path.dirname(fullPath);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
-      const payload = {
-        accessToken: this.accessToken,
-        refreshToken: this.refreshToken,
-        expiresAt: this.expiresAt,
-        projectId: this.projectId,
-      };
-      fs.writeFileSync(fullPath, JSON.stringify(payload, null, 2), "utf-8");
-    } catch {
-      // Best-effort; never throw
-    }
+  private async saveToTokenCache(): Promise<void> {
+    if(!this.tokenStorePath) return;
+    // Dashboard-managed credentials already use the encrypted account store.
+    if(this.credentialStore && !this.hasEnvCredentials()) return;
+    await saveTokenStore(this.tokenStorePath,{
+      accessToken:this.accessToken,refreshToken:this.refreshToken,
+      expiresAt:this.expiresAt,projectId:this.projectId,
+    },this.cacheOptions);
   }
 }

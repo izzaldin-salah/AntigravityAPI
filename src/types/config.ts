@@ -26,6 +26,8 @@ export interface AntigravityCredentials {
 export type ProviderConfig = {
   mode: "antigravity";
   credentials: AntigravityCredentials;
+  timeouts?: import("../core/chat-deadline").ChatTimeouts;
+  maxResponseBytes?: number;
 };
 
 /** v1.1: admin dashboard configuration (resolved by loadConfig; secrets never logged). */

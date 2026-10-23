@@ -11,7 +11,10 @@ import {
   OpenAIHttpError,
   mapProviderErrorToHttp,
 } from "../core/errors";
+import { createSseWriter } from "../core/sse-writer";
+import { ProviderError } from "../types/provider";
 import { generateChatCompletionId } from "../core/id";
+import { abortable, cancellationReason, createChatDeadline, type ChatTimeouts } from "../core/chat-deadline";
 import {
   createJsonFenceFilter,
   stripJsonFence,
@@ -32,11 +35,13 @@ import type {
 export interface ChatRouteOptions {
   provider: AIProvider;
   usageTracker: UsageTracker;
+  timeouts?: Partial<ChatTimeouts>;
+  maxResponseBytes?: number;
 }
 
 function estimateTokens(
   normalized: NormalizedChatRequest,
-  generatedContent: string,
+  generatedChars: number,
 ): OpenAIUsage {
   // If the provider omits usage, estimate token count using ceil(chars / 4) per contract guidelines
   const promptChars = normalized.messages.reduce(
@@ -44,7 +49,7 @@ function estimateTokens(
     0,
   );
   const promptTokens = Math.max(1, Math.ceil(promptChars / 4));
-  const completionTokens = Math.ceil(generatedContent.length / 4);
+  const completionTokens = Math.ceil(generatedChars / 4);
   const totalTokens = promptTokens + completionTokens;
 
   return {
@@ -63,6 +68,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (
       typeof req.id === "string" ? req.id : `req_${generateChatCompletionId()}`;
 
     const abortController = new AbortController();
+    let deadline: ReturnType<typeof createChatDeadline> | undefined;
     const onDisconnect = () => {
       // Only treat this as a disconnect while the response is still in flight.
       // NOTE: req.raw "close" fires when the request body has been fully consumed
@@ -80,6 +86,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (
     }
 
     const cleanupListeners = () => {
+      deadline?.dispose();
       req.raw.off("aborted", onDisconnect);
       reply.raw.off("close", onDisconnect);
       if (req.raw.socket) {
@@ -104,7 +111,19 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (
     }
 
     const { normalized, streamOptions } = validated;
+    deadline = createChatDeadline(abortController.signal,opts.timeouts);
+    normalized.signal = deadline.signal;
+    normalized.onUpstreamProgress = deadline.progress;
 
+    let responseBytes = 0;
+    const countOutput = (text: string) => {
+      responseBytes += Buffer.byteLength(text);
+      if(responseBytes > (opts.maxResponseBytes ?? 16*1024*1024)) {
+        const error = new ProviderError({code:"upstream_error",message:"Model response exceeds the configured byte limit.",status:502,details:{kind:"limit"}});
+        abortController.abort(error);
+        throw error;
+      }
+    };
     if (!normalized.stream) {
       try {
         let completionId = generateChatCompletionId();
@@ -113,6 +132,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (
         let accumulatedContent = "";
         const toolCallsMap = new Map<number, OpenAIToolCall>();
         let finishReason: FinishReason = "stop";
+        let receivedCompletion = false;
         let providerUsage: UsageInfo | undefined;
 
         for await (const event of opts.provider.chat(normalized)) {
@@ -125,8 +145,10 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (
             model = event.model || model;
             created = event.created || created;
           } else if (event.type === "delta") {
+            countOutput(event.text);
             accumulatedContent += event.text;
           } else if (event.type === "tool_call_delta") {
+            countOutput((event.argumentsDelta ?? "") + (event.name ?? "") + (event.id ?? ""));
             let tc = toolCallsMap.get(event.index);
             if (!tc) {
               tc = {
@@ -146,23 +168,27 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (
           } else if (event.type === "usage") {
             providerUsage = event.usage;
           } else if (event.type === "done") {
-            finishReason = event.finishReason === "error" ? "stop" : event.finishReason;
+            if (event.finishReason === "error") throw new ProviderError({code:"upstream_error",message:"Provider reported a failed completion."});
+            finishReason = event.finishReason;
+            receivedCompletion = true;
             if (event.usage) {
               providerUsage = event.usage;
             }
+            break;
           } else if (event.type === "error") {
             const { status, body } = mapProviderErrorToHttp(event.error);
             return reply.status(status).send(body);
           }
         }
 
+        if (!receivedCompletion) throw new ProviderError({code:"upstream_error",message:"Provider ended without a completion event.",details:{kind:"protocol"}});
         const finalUsage: OpenAIUsage = providerUsage
           ? {
               prompt_tokens: providerUsage.promptTokens,
               completion_tokens: providerUsage.completionTokens,
               total_tokens: providerUsage.totalTokens,
             }
-          : estimateTokens(normalized, accumulatedContent);
+          : estimateTokens(normalized, accumulatedContent.length);
 
         // Record usage for every completed request
         opts.usageTracker.record(model, finalUsage);
@@ -205,6 +231,23 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (
       }
     }
 
+    // Resolve the first provider event before committing HTTP 200 headers.
+    const iterator = opts.provider.chat(normalized)[Symbol.asyncIterator]();
+    let first: IteratorResult<import("../types/provider").ProviderEvent>;
+    try {
+      first = await abortable(iterator.next(),normalized.signal!);
+      if(first.done) throw new ProviderError({code:"upstream_error",message:"Provider returned no completion events."});
+      if(first.value.type === "error") throw new ProviderError(first.value.error);
+    } catch(error) {
+      void iterator.return?.().catch(()=>undefined);
+      cleanupListeners();
+      const {status,body}=mapProviderErrorToHttp(error);
+      return reply.status(status).send(body);
+    }
+    async function* preparedEvents() {
+      try { yield first.value; yield* {[Symbol.asyncIterator]:()=>iterator}; }
+      finally { void iterator.return?.().catch(()=>undefined); }
+    }
     // --- Streaming (SSE) path ---
     reply.hijack();
 
@@ -217,23 +260,23 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (
     });
     reply.raw.flushHeaders?.();
 
-    const heartbeatInterval = setInterval(() => {
-      if (!reply.raw.writableEnded && !reply.raw.destroyed) {
-        reply.raw.write(": keep-alive\n\n");
-      }
-    }, 15000);
-
-    const writeSseFrame = (data: unknown) => {
-      if (!reply.raw.writableEnded && !reply.raw.destroyed) {
-        reply.raw.write(`data: ${JSON.stringify(data)}\n\n`);
-      }
+    const writer = createSseWriter(reply.raw,normalized.signal!);
+    const heartbeatInterval = setInterval(writer.heartbeat,15000);
+    const writeSseFrame = (data: unknown) => writer.write(`data: ${JSON.stringify(data)}\n\n`);
+    const writeError = (error: unknown) => {
+      const {body}=mapProviderErrorToHttp(error);
+      if(reply.raw.destroyed || reply.raw.writableEnded) return;
+      // A deadline may already have aborted the writer. Emit one bounded terminal
+      // frame only when writable; otherwise close the stalled connection.
+      if(reply.raw.writableNeedDrain) { reply.raw.destroy(); return; }
+      reply.raw.end(`data: ${JSON.stringify(body)}\n\ndata: [DONE]\n\n`);
     };
 
     let streamId = generateChatCompletionId();
     let streamModel = normalized.model;
     let streamCreated = Math.floor(Date.now() / 1000);
     let roleChunkSent = false;
-    let accumulatedText = "";
+    let generatedChars = 0;
     let providerUsage: UsageInfo | undefined;
     let finishReason: FinishReason = "stop";
     let completedNormally = false;
@@ -243,7 +286,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (
       : undefined;
 
     try {
-      for await (const event of opts.provider.chat(normalized)) {
+      for await (const event of preparedEvents()) {
         if (
           abortController.signal.aborted ||
           reply.raw.destroyed ||
@@ -259,26 +302,28 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (
           streamId = event.id || streamId;
           streamModel = event.model || streamModel;
           streamCreated = event.created || streamCreated;
-          writeSseFrame(createRoleChunk(streamId, streamModel, streamCreated));
+          await writeSseFrame(createRoleChunk(streamId, streamModel, streamCreated));
           roleChunkSent = true;
         } else if (event.type === "delta") {
           if (!roleChunkSent) {
-            writeSseFrame(createRoleChunk(streamId, streamModel, streamCreated));
+            await writeSseFrame(createRoleChunk(streamId, streamModel, streamCreated));
             roleChunkSent = true;
           }
           const text = fenceFilter ? fenceFilter.push(event.text) : event.text;
-          accumulatedText += text;
+          countOutput(event.text);
+          generatedChars += text.length;
           if (text) {
-            writeSseFrame(
+            await writeSseFrame(
               createContentChunk(streamId, streamModel, streamCreated, text),
             );
           }
         } else if (event.type === "tool_call_delta") {
+          countOutput((event.argumentsDelta ?? "") + (event.name ?? "") + (event.id ?? ""));
           if (!roleChunkSent) {
-            writeSseFrame(createRoleChunk(streamId, streamModel, streamCreated));
+            await writeSseFrame(createRoleChunk(streamId, streamModel, streamCreated));
             roleChunkSent = true;
           }
-          writeSseFrame(
+          await writeSseFrame(
             createToolCallChunk(
               streamId,
               streamModel,
@@ -292,25 +337,26 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (
         } else if (event.type === "usage") {
           providerUsage = event.usage;
         } else if (event.type === "done") {
+          if (event.finishReason === "error") throw new ProviderError({code:"upstream_error",message:"Provider reported a failed completion."});
           // Flush anything the JSON fence filter still holds back.
           const tail = fenceFilter ? fenceFilter.finish() : "";
           if (tail) {
-            accumulatedText += tail;
-            writeSseFrame(
+            generatedChars += tail.length;
+            await writeSseFrame(
               createContentChunk(streamId, streamModel, streamCreated, tail),
             );
           }
-          finishReason = event.finishReason === "error" ? "stop" : event.finishReason;
+          finishReason = event.finishReason;
           if (event.usage) {
             providerUsage = event.usage;
           }
 
           if (!roleChunkSent) {
-            writeSseFrame(createRoleChunk(streamId, streamModel, streamCreated));
+            await writeSseFrame(createRoleChunk(streamId, streamModel, streamCreated));
             roleChunkSent = true;
           }
 
-          writeSseFrame(
+          await writeSseFrame(
             createFinishChunk(streamId, streamModel, streamCreated, finishReason),
           );
 
@@ -321,44 +367,40 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (
                   completion_tokens: providerUsage.completionTokens,
                   total_tokens: providerUsage.totalTokens,
                 }
-              : estimateTokens(normalized, accumulatedText);
-            writeSseFrame(
+              : estimateTokens(normalized, generatedChars);
+            await writeSseFrame(
               createUsageChunk(streamId, streamModel, streamCreated, usageData),
             );
           }
 
           if (!reply.raw.writableEnded && !reply.raw.destroyed) {
-            reply.raw.write("data: [DONE]\n\n");
+            await writer.write("data: [DONE]\n\n");
           }
           completedNormally = true;
+          break;
         } else if (event.type === "error") {
-          const { body } = mapProviderErrorToHttp(event.error);
-          writeSseFrame(body);
-          if (!reply.raw.writableEnded && !reply.raw.destroyed) {
-            reply.raw.write("data: [DONE]\n\n");
-          }
+          writeError(new ProviderError(event.error));
           break;
         }
       }
-    } catch (err) {
-      const { body } = mapProviderErrorToHttp(err);
-      writeSseFrame(body);
-      if (!reply.raw.writableEnded && !reply.raw.destroyed) {
-        reply.raw.write("data: [DONE]\n\n");
+      if(!completedNormally && !reply.raw.writableEnded && !reply.raw.destroyed && !normalized.signal?.aborted) {
+        throw new ProviderError({code:"upstream_error",message:"Provider stream ended without completion."});
       }
+    } catch (err) {
+      writeError(normalized.signal?.aborted ? cancellationReason(normalized.signal) : err);
     } finally {
       clearInterval(heartbeatInterval);
       cleanupListeners();
 
       // Record usage for every completed or partially completed request
-      if (completedNormally || accumulatedText.length > 0 || providerUsage) {
+      if (completedNormally || generatedChars > 0 || providerUsage) {
         const finalUsage: OpenAIUsage = providerUsage
           ? {
               prompt_tokens: providerUsage.promptTokens,
               completion_tokens: providerUsage.completionTokens,
               total_tokens: providerUsage.totalTokens,
             }
-          : estimateTokens(normalized, accumulatedText);
+          : estimateTokens(normalized, generatedChars);
         opts.usageTracker.record(streamModel, finalUsage);
       }
 

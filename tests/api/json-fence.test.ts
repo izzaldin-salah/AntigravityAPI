@@ -5,6 +5,36 @@ import {
 } from "../../src/core/json-fence";
 
 describe("json fence handling", () => {
+  function filtered(parts: string[]): string {
+    const filter = createJsonFenceFilter();
+    const output = parts.map(part => filter.push(part)).join("") + filter.finish();
+    expect(filter.finish()).toBe("");
+    return output;
+  }
+
+  it("preserves JSON values across every boundary including literal backticks", () => {
+    for (const text of [
+      '```json\n{"ok":true}\n```',
+      ' \r\n```json\r\n{"code":"```","unicode":"é"}\r\n```  ',
+      '```\n{"ok":true}\n```',
+      '  {"code":"```"}  ',
+      '```json\n{"ok":true}',
+    ]) {
+      for (let split = 0; split <= text.length; split++) {
+        expect(JSON.parse(filtered([text.slice(0, split), "", text.slice(split)])))
+          .toEqual(JSON.parse(stripJsonFence(text)));
+      }
+      expect(JSON.parse(filtered([...text]))).toEqual(JSON.parse(stripJsonFence(text)));
+    }
+    expect(filtered(['```json\n', '{"ok":true}\n', '``', '`']).trim()).toBe('{"ok":true}');
+    expect(JSON.parse(filtered(['```json\n', '{"code":"```"}', '\n```']))).toEqual({code:"```"});
+  });
+
+  it("passes incomplete prefixes through and bounds undecided prefixes", () => {
+    for (const text of ["", "`", "``", "```json", "  {\"ok\":true}  ", " ".repeat(5000)]) {
+      expect(filtered([...text])).toBe(text);
+    }
+  });
   it("strips a fenced json payload", () => {
     expect(
       stripJsonFence('```json\n{"capital":"Paris"}\n```'),

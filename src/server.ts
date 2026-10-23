@@ -29,7 +29,11 @@ async function main(): Promise<void> {
     tokenEndpoint: config.oauth.tokenEndpoint,
   });
 
+  const cacheWarnings = new Set<string>();
+  let cacheLogger: ((message:string)=>void) | undefined;
   const provider = createProviderFromConfig(config.provider, {
+    cacheEncryptionKey: config.credentials.encryptionKey,
+    cacheWarning: message => {if(!cacheWarnings.has(message)) {cacheWarnings.add(message);cacheLogger?.(message);}},
     credentialStore,
     tokenEndpoint: config.oauth.tokenEndpoint,
     modelSettingsStore: createModelSettingsStore(config.credentials),
@@ -58,6 +62,8 @@ async function main(): Promise<void> {
   }
 
   await registerSecurityPlugins(app, config);
+  cacheLogger=message=>app.log.warn(message);
+  for(const warning of cacheWarnings) cacheLogger(warning);
   try {
     await app.listen({ host: config.host, port: config.port });
   } catch (err) {

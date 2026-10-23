@@ -120,7 +120,7 @@ Configure the following environment variables in the Render Dashboard (**Environ
 | `ANTIGRAVITY_CLIENT_SECRET` | No | **Yes** | `...` | OAuth client secret. |
 | `ANTIGRAVITY_PROJECT_ID` | No | No | `...` | Upstream project ID. |
 | `ANTIGRAVITY_ENDPOINT` | No | No | *(Leave blank)* | Upstream provider base URL override. |
-| `ANTIGRAVITY_TOKEN_STORE_PATH` | No | No | `./.data/antigravity-token.json` | Ephemeral on-disk cache path. |
+| `ANTIGRAVITY_TOKEN_STORE_PATH` | No | No | `./.data/antigravity-token.json` | Encrypted ephemeral cache; requires `CREDENTIAL_ENCRYPTION_KEY`, otherwise memory only. |
 
 ---
 

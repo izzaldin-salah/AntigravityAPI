@@ -7,13 +7,14 @@
  * message content — the fences have to be removed.
  */
 
-const OPENING_FENCE = /^\s*```[a-zA-Z0-9_+.-]*[ \t]*\r?\n?/;
+const OPENING_FENCE = /^\s*```[a-zA-Z0-9_+.-]*[ \t]*\r?\n/;
 const CLOSING_FENCE = /```\s*$/;
+const MAX_PENDING = 4096;
 
 /** Strip a leading/trailing Markdown code fence from a JSON payload. */
 export function stripJsonFence(text: string): string {
   const trimmed = text.trim();
-  if (!trimmed.startsWith("```")) return text;
+  if (!OPENING_FENCE.test(trimmed)) return text;
   const withoutOpening = trimmed.replace(OPENING_FENCE, "");
   return withoutOpening.replace(CLOSING_FENCE, "").trim();
 }
@@ -39,15 +40,33 @@ export function createJsonFenceFilter(): JsonFenceFilter {
   let pending = "";
   let decided = false;
   let stripping = false;
+  let suffix = "";
+  let finished = false;
+
+  function body(text: string): string {
+    const combined = suffix + text;
+    const candidate = combined.match(/`{1,3}\s*$/);
+    suffix = candidate?.[0] ?? "";
+    // An exceptional trailing whitespace run must not retain an unbounded response.
+    if (suffix.length > MAX_PENDING) throw new Error("JSON fence suffix exceeds buffer limit");
+    return combined.slice(0, combined.length - suffix.length);
+  }
 
   return {
     push(text: string): string {
+      if (finished) return "";
       if (decided) {
-        return stripping ? text.replace(/```/g, "") : text;
+        return stripping ? body(text) : text;
       }
 
       pending += text;
       const trimmed = pending.trimStart();
+      if (pending.length > MAX_PENDING && !OPENING_FENCE.test(pending)) {
+        decided = true;
+        const out = pending;
+        pending = "";
+        return out; // Pathological undecided prefixes are passed through unchanged.
+      }
       if (trimmed.length === 0) return "";
 
       if (trimmed[0] !== "`") {
@@ -74,7 +93,7 @@ export function createJsonFenceFilter(): JsonFenceFilter {
       // A fence: wait until the opening marker is complete (language tag and
       // newline) before deciding how to strip it.
       if (!/^```[a-zA-Z0-9_+.-]*[ \t]*\r?\n/.test(trimmed)) {
-        if (/^```[a-zA-Z0-9_+.-]*[ \t]*$/.test(trimmed)) {
+        if (/^```[a-zA-Z0-9_+.-]*[ \t]*\r?$/.test(trimmed)) {
           return ""; // the language tag may still be arriving
         }
         decided = true;
@@ -87,16 +106,20 @@ export function createJsonFenceFilter(): JsonFenceFilter {
       stripping = true;
       const out = pending.replace(OPENING_FENCE, "");
       pending = "";
-      return out.replace(/```/g, "");
+      return body(out);
     },
     finish(): string {
+      if (finished) return "";
+      finished = true;
       if (!decided) {
         decided = true;
         const out = pending;
         pending = "";
         return out;
       }
-      return "";
+      const out = stripping && CLOSING_FENCE.test(suffix) ? "" : suffix;
+      suffix = "";
+      return out;
     },
   };
 }

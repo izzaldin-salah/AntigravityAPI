@@ -7,6 +7,8 @@ function createSseStream(chunks: string[]): ReadableStream<Uint8Array> {
   return new ReadableStream({
     start(controller) {
       for (const chunk of chunks) {
+        // Successful fixtures include model completion evidence, not just a transport sentinel.
+        if (chunk.includes("data: [DONE]")) controller.enqueue(encoder.encode('data: {"response":{"candidates":[{"finishReason":"STOP"}]}}\n\n'));
         controller.enqueue(encoder.encode(chunk));
       }
       controller.close();
@@ -543,8 +545,8 @@ describe("AntigravityProvider", () => {
       expect(contents[2]).toEqual({
         role: "user",
         parts: [
-          { functionResponse: { name: "get_weather", response: { output: "18C" } } },
-          { functionResponse: { name: "get_time", response: { output: "12:00" } } },
+          { functionResponse: { id: "call_abc", name: "get_weather", response: { output: "18C" } } },
+          { functionResponse: { id: "call_def", name: "get_time", response: { output: "12:00" } } },
         ],
       });
     });
